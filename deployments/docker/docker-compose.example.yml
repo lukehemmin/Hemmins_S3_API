@@ -1,0 +1,31 @@
+services:
+  hemmins-s3:
+    image: hemmins/s3:dev
+    container_name: hemmins-s3
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    environment:
+      HEMMINS_CONFIG_FILE: /app/config/config.yaml
+      HEMMINS_AUTH_MASTER_KEY: ${HEMMINS_AUTH_MASTER_KEY:?set in .env}
+      HEMMINS_BOOTSTRAP_ADMIN_USERNAME: ${HEMMINS_BOOTSTRAP_ADMIN_USERNAME:-admin}
+      HEMMINS_BOOTSTRAP_ADMIN_PASSWORD: ${HEMMINS_BOOTSTRAP_ADMIN_PASSWORD:?set in .env}
+      HEMMINS_BOOTSTRAP_ROOT_ACCESS_KEY: ${HEMMINS_BOOTSTRAP_ROOT_ACCESS_KEY:-rootadmin}
+      HEMMINS_BOOTSTRAP_ROOT_SECRET_KEY: ${HEMMINS_BOOTSTRAP_ROOT_SECRET_KEY:?set in .env}
+    volumes:
+      - ../../config/config.example.yaml:/app/config/config.yaml:ro
+      - hemmins-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  hemmins-data:
+
+# This is a draft deployment example.
+# Replace the image reference with the real published image or a local build
+# once the server binary and Dockerfile exist in the repository.
+# The healthcheck also assumes the final image contains curl or an equivalent HTTP client.

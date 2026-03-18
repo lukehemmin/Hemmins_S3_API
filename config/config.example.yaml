@@ -1,0 +1,42 @@
+version: 1
+
+server:
+  listen: ":9000"
+  public_endpoint: "http://localhost:9000"
+  enable_ui: true
+  trust_proxy_headers: false
+
+s3:
+  region: "us-east-1"
+  virtual_host_suffix: ""
+  max_presign_ttl: "24h"
+
+paths:
+  meta_db: "/data/meta/metadata.db"
+  object_root: "/data/objects"
+  multipart_root: "/data/multipart"
+  temp_root: "/data/tmp"
+  log_root: "/data/logs"
+
+auth:
+  master_key: "${HEMMINS_AUTH_MASTER_KEY}"
+
+ui:
+  session_ttl: "12h"
+  session_idle_ttl: "30m"
+
+logging:
+  level: "info"
+  access_log: true
+
+gc:
+  orphan_scan_interval: "24h"
+  orphan_grace_period: "1h"
+  multipart_expiry: "24h"
+
+# Bootstrap credentials are intentionally not stored here.
+# Supply them only on first run through environment variables:
+# - HEMMINS_BOOTSTRAP_ADMIN_USERNAME
+# - HEMMINS_BOOTSTRAP_ADMIN_PASSWORD
+# - HEMMINS_BOOTSTRAP_ROOT_ACCESS_KEY
+# - HEMMINS_BOOTSTRAP_ROOT_SECRET_KEY
