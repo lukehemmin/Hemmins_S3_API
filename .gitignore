@@ -4,3 +4,8 @@ config/config.local.yaml
 *.db
 *.db-shm
 *.db-wal
+
+# Go build artifacts
+/hemmins-s3
+/hemmins-s3-api
+/bin/
