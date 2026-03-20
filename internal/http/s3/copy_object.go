@@ -96,14 +96,14 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBuc
 	}
 
 	// Step 3: validate source bucket name.
-	if err := validateBucketName(srcBucket); err != nil {
+	if err := ValidateBucketName(srcBucket); err != nil {
 		writeError(w, r, http.StatusBadRequest, "InvalidBucketName",
 			"The source bucket name is not valid.")
 		return
 	}
 
 	// Step 4: validate destination bucket name.
-	if err := validateBucketName(dstBucket); err != nil {
+	if err := ValidateBucketName(dstBucket); err != nil {
 		writeError(w, r, http.StatusBadRequest, "InvalidBucketName", err.Error())
 		return
 	}

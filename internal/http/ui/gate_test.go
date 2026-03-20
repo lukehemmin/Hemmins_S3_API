@@ -1,7 +1,10 @@
 package ui_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	ui "github.com/lukehemmin/hemmins-s3-api/internal/http/ui"
@@ -11,6 +14,18 @@ import (
 var notReady = func() bool { return false }
 var alwaysReady = func() bool { return true }
 
+// doRawLogin issues POST /ui/api/session/login WITHOUT fetching CSRF token first.
+// Used for gate tests where the gate returns 503 for all requests including CSRF.
+func doRawLogin(t *testing.T, handler http.Handler, username, password string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(map[string]string{"username": username, "password": password})
+	req := httptest.NewRequest(http.MethodPost, "/ui/api/session/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	return rr
+}
+
 // TestGate_NotReady_Login: setup-required state → /ui/api/session/login returns 503.
 // Without the gate, an empty DB returns 401 "invalid credentials", which falsely implies
 // bootstrap succeeded but credentials are wrong. 503 "setup required" is unambiguous.
@@ -19,7 +34,8 @@ func TestGate_NotReady_Login(t *testing.T) {
 	base, _ := setupTestUIServer(t, false)
 	handler := ui.WithReadinessGate(notReady, base)
 
-	rr := doLogin(t, handler, testAdminUsername, testAdminPassword)
+	// Use raw login to avoid fetching CSRF first (which would also return 503).
+	rr := doRawLogin(t, handler, testAdminUsername, testAdminPassword)
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503, got %d: %s", rr.Code, rr.Body.String())
 	}
@@ -42,6 +58,19 @@ func TestGate_NotReady_Dashboard(t *testing.T) {
 	handler := ui.WithReadinessGate(notReady, base)
 
 	rr := doDashboard(t, handler, nil)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestGate_NotReady_CSRF: setup-required state → /ui/api/session/csrf returns 503.
+func TestGate_NotReady_CSRF(t *testing.T) {
+	base, _ := setupTestUIServer(t, false)
+	handler := ui.WithReadinessGate(notReady, base)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/api/session/csrf", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503, got %d: %s", rr.Code, rr.Body.String())
 	}
@@ -81,8 +110,8 @@ func TestGate_ReadinessTransition(t *testing.T) {
 	ready := false
 	handler := ui.WithReadinessGate(func() bool { return ready }, base)
 
-	// Before ready: 503.
-	rr := doLogin(t, handler, testAdminUsername, testAdminPassword)
+	// Before ready: 503 (use raw login to avoid CSRF fetch).
+	rr := doRawLogin(t, handler, testAdminUsername, testAdminPassword)
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Errorf("before ready: expected 503, got %d", rr.Code)
 	}
@@ -90,7 +119,7 @@ func TestGate_ReadinessTransition(t *testing.T) {
 	// Flip to ready.
 	ready = true
 
-	// After ready: normal handler takes over.
+	// After ready: normal handler takes over (CSRF is now available).
 	rr2 := doLogin(t, handler, testAdminUsername, testAdminPassword)
 	if rr2.Code != http.StatusOK {
 		t.Errorf("after ready: expected 200, got %d: %s", rr2.Code, rr2.Body.String())

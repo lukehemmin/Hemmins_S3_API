@@ -6,19 +6,21 @@ import (
 	"strings"
 )
 
-// ErrInvalidBucketName is returned by validateBucketName when the name violates
+// ErrInvalidBucketName is returned by ValidateBucketName when the name violates
 // any of the S3 bucket naming rules.
 // Per s3-compatibility-matrix.md section 2.3.
 var ErrInvalidBucketName = errors.New("invalid bucket name")
 
-// validateBucketName enforces S3 bucket naming rules.
+// ValidateBucketName enforces S3 bucket naming rules.
 // Rules per s3-compatibility-matrix.md section 2.3:
 //   - Length 3–63
 //   - Only lowercase letters (a–z), digits (0–9), hyphens (-), and dots (.)
 //   - Must not start or end with - or .
 //   - Must not contain ..
 //   - Must not be formatted as an IP address (e.g. 192.168.1.1)
-func validateBucketName(name string) error {
+//
+// Exported for use by the UI bucket create API to avoid duplicate validation logic.
+func ValidateBucketName(name string) error {
 	if len(name) < 3 || len(name) > 63 {
 		return ErrInvalidBucketName
 	}

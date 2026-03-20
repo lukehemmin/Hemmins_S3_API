@@ -70,7 +70,7 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 	}
 
 	// Step 2: validate bucket name.
-	if err := validateBucketName(bucketName); err != nil {
+	if err := ValidateBucketName(bucketName); err != nil {
 		writeError(w, r, http.StatusBadRequest, "InvalidBucketName", err.Error())
 		return
 	}

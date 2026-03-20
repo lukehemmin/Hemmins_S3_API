@@ -28,7 +28,7 @@ func (s *Server) handleListObjectsV2(w http.ResponseWriter, r *http.Request, buc
 		return
 	}
 
-	if err := validateBucketName(bucketName); err != nil {
+	if err := ValidateBucketName(bucketName); err != nil {
 		writeError(w, r, http.StatusBadRequest, "InvalidBucketName",
 			"The specified bucket is not valid.")
 		return

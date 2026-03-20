@@ -51,7 +51,7 @@ func (s *Server) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Step 2: validate bucket name.
-	if err := validateBucketName(bucketName); err != nil {
+	if err := ValidateBucketName(bucketName); err != nil {
 		writeError(w, r, http.StatusBadRequest, "InvalidBucketName", err.Error())
 		return
 	}

@@ -148,6 +148,7 @@ func main() {
 			cfg.UI.SessionIdleTTL.Duration,
 		)
 		uiSrv := uiapi.NewServer(db, uiStore, secureCookie)
+		uiSrv.SetConfig(cfg)
 		mux.Handle("/ui/", uiapi.WithReadinessGate(state.IsReady, uiSrv.Handler()))
 		log.Printf("ui: session API enabled (secure_cookie=%v)", secureCookie)
 	} else {
