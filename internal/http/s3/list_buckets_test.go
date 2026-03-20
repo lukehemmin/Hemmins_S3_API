@@ -418,7 +418,7 @@ func TestRouter_PathMapping(t *testing.T) {
 	}{
 		{http.MethodGet, "/", http.StatusOK, "GET / → ListBuckets (authenticated)"},
 		{http.MethodGet, "/some-bucket", http.StatusNotImplemented, "GET /bucket → 501"},
-		{http.MethodGet, "/some-bucket/key", http.StatusNotImplemented, "GET /bucket/key → 501"},
+		{http.MethodGet, "/some-bucket/key", http.StatusNotFound, "GET /bucket/key → NoSuchBucket"},
 		{http.MethodPut, "/", http.StatusNotImplemented, "PUT / → 501"},
 		{http.MethodDelete, "/", http.StatusNotImplemented, "DELETE / → 501"},
 	}

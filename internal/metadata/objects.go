@@ -1,6 +1,7 @@
 package metadata
 
 import (
+	"database/sql"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -8,6 +9,87 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrObjectNotFound is returned by GetObjectByKey when the named object does not exist
+// in the specified bucket.
+// The HTTP layer maps this to the S3 error code NoSuchKey (404).
+// Per s3-compatibility-matrix.md section 9.2.
+var ErrObjectNotFound = errors.New("object not found")
+
+// ErrCorruptObject is returned by GetObjectByKey when the object row has is_corrupt=1.
+// Per system-architecture.md section 6.3: a metadata row whose blob is missing is
+// marked corrupt; the HTTP layer maps this to InternalError (500).
+var ErrCorruptObject = errors.New("object is marked corrupt")
+
+// ObjectDetail holds the full columns needed to serve a GetObject response.
+// Kept separate from ObjectRecord (which is used for listing) so that the listing
+// path does not carry storage-internal fields.
+// Per system-architecture.md section 4.2.
+type ObjectDetail struct {
+	Key          string
+	Size         int64
+	ETag         string    // raw MD5 hex, no surrounding quotes
+	ContentType  string
+	StoragePath  string
+	LastModified time.Time
+	MetadataJSON string    // JSON of x-amz-meta-* pairs stored at PUT time
+}
+
+// GetObjectByKey retrieves the metadata row for the given (bucketName, objectKey) pair.
+//
+// Precondition: the caller (HTTP handler) must have already verified that the bucket
+// exists via BucketExists before calling this function. If the bucket does not exist
+// the JOIN will produce no rows and ErrObjectNotFound will be returned, which would
+// incorrectly map to NoSuchKey rather than NoSuchBucket. The two-step pattern
+// (BucketExists then GetObjectByKey) is consistent with all other handlers.
+//
+// Returns:
+//   - (ObjectDetail, nil)        on success
+//   - ({}, ErrObjectNotFound)    when the object row is absent
+//   - ({}, ErrCorruptObject)     when is_corrupt=1
+//   - ({}, wrapped error)        on database failure
+//
+// Per system-architecture.md section 5.2 and s3-compatibility-matrix.md section 6.2.
+func (db *DB) GetObjectByKey(bucketName, objectKey string) (ObjectDetail, error) {
+	var key, etag, contentType, storagePath, lastModStr, metaJSON string
+	var size int64
+	var isCorrupt int
+
+	err := db.sqldb.QueryRow(`
+		SELECT o.object_key, o.size, o.etag, o.content_type, o.storage_path,
+		       o.last_modified, o.metadata_json, o.is_corrupt
+		FROM objects o
+		JOIN buckets b ON o.bucket_id = b.id
+		WHERE b.name = ? AND o.object_key = ?
+	`, bucketName, objectKey).Scan(
+		&key, &size, &etag, &contentType, &storagePath, &lastModStr, &metaJSON, &isCorrupt,
+	)
+	if err == sql.ErrNoRows {
+		return ObjectDetail{}, ErrObjectNotFound
+	}
+	if err != nil {
+		return ObjectDetail{}, fmt.Errorf("getting object %q in bucket %q: %w", objectKey, bucketName, err)
+	}
+
+	if isCorrupt != 0 {
+		return ObjectDetail{}, ErrCorruptObject
+	}
+
+	var lm time.Time
+	if t, parseErr := time.Parse(time.RFC3339, lastModStr); parseErr == nil {
+		lm = t
+	}
+
+	return ObjectDetail{
+		Key:          key,
+		Size:         size,
+		ETag:         etag,
+		ContentType:  contentType,
+		StoragePath:  storagePath,
+		LastModified: lm,
+		MetadataJSON: metaJSON,
+	}, nil
+}
 
 // ErrInvalidContinuationToken is returned by ListObjectsV2 when the caller
 // supplies a continuation-token that cannot be decoded.
@@ -241,6 +323,63 @@ func (db *DB) UpsertObject(bucketName, objectKey string, input PutObjectInput) e
 		return fmt.Errorf("upserting object %q in bucket %q: %w", objectKey, bucketName, err)
 	}
 	return nil
+}
+
+// DeleteObject removes the metadata row for (bucketName, objectKey) and returns
+// the blob storage path that was recorded in the row.
+//
+// Returns ErrObjectNotFound when no matching row exists.
+//
+// is_corrupt is intentionally ignored: DeleteObject must be able to clean up
+// corrupt-flagged rows. Blocking DELETE on the same corruption that makes Get/Head
+// fail would prevent callers from recovering from corrupt states via the normal API.
+// Per operations-runbook.md section 5.1 and s3-compatibility-matrix.md section 3.
+//
+// Deletion is wrapped in a transaction: the SELECT (to retrieve storage_path) and
+// the DELETE are atomic so that no concurrent writer can race between them.
+//
+// Caller is responsible for removing the blob file at storagePath after this returns.
+// Per operations-runbook.md section 4.1: deleting the metadata row first means that
+// a crash mid-delete leaves an orphan blob (quarantine candidate, recoverable) rather
+// than a corrupt metadata row (worse state).
+func (db *DB) DeleteObject(bucketName, objectKey string) (storagePath string, err error) {
+	tx, err := db.sqldb.Begin()
+	if err != nil {
+		return "", fmt.Errorf("beginning delete transaction for object %q in bucket %q: %w",
+			objectKey, bucketName, err)
+	}
+	defer tx.Rollback() //nolint:errcheck — rollback on error path only; commit handles success
+
+	// Retrieve the storage path. is_corrupt is intentionally not filtered here.
+	err = tx.QueryRow(`
+		SELECT o.storage_path
+		FROM objects o
+		JOIN buckets b ON o.bucket_id = b.id
+		WHERE b.name = ? AND o.object_key = ?
+	`, bucketName, objectKey).Scan(&storagePath)
+	if err == sql.ErrNoRows {
+		return "", ErrObjectNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("looking up object %q in bucket %q for delete: %w",
+			objectKey, bucketName, err)
+	}
+
+	_, err = tx.Exec(`
+		DELETE FROM objects
+		WHERE bucket_id = (SELECT id FROM buckets WHERE name = ?)
+		  AND object_key = ?
+	`, bucketName, objectKey)
+	if err != nil {
+		return "", fmt.Errorf("deleting object row %q in bucket %q: %w",
+			objectKey, bucketName, err)
+	}
+
+	if commitErr := tx.Commit(); commitErr != nil {
+		return "", fmt.Errorf("committing delete for object %q in bucket %q: %w",
+			objectKey, bucketName, commitErr)
+	}
+	return storagePath, nil
 }
 
 // escapeLike escapes the LIKE special characters (%, _, \) in s so that it

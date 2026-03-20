@@ -6,11 +6,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/lukehemmin/hemmins-s3-api/internal/bootstrap"
 	"github.com/lukehemmin/hemmins-s3-api/internal/config"
 	"github.com/lukehemmin/hemmins-s3-api/internal/health"
 	s3api "github.com/lukehemmin/hemmins-s3-api/internal/http/s3"
+	uiapi "github.com/lukehemmin/hemmins-s3-api/internal/http/ui"
 	"github.com/lukehemmin/hemmins-s3-api/internal/metadata"
 )
 
@@ -125,12 +127,37 @@ func main() {
 	// Build S3 API server and attach readiness gating.
 	// Per product-spec.md section 8.4: S3 API must not be served in setup-required state.
 	s3srv := s3api.NewServer(db, cfg.S3.Region, cfg.Auth.MasterKey)
+	s3srv.SetStoragePaths(cfg.Paths.TempRoot, cfg.Paths.ObjectRoot)
+	s3srv.SetMultipartRoot(cfg.Paths.MultipartRoot)
+	s3srv.SetMultipartExpiry(cfg.GC.MultipartExpiry.Duration)
 	s3srv.SetReady(state.IsReady)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", health.HealthzHandler)
 	mux.HandleFunc("/readyz", health.ReadyzHandler(state))
-	// S3 service root: registered last so /healthz and /readyz take precedence.
+
+	// UI session API routes.
+	// enable_ui=false policy: register a 404 handler so /ui/ never reaches the S3 handler.
+	// enable_ui=true policy: register the full session auth API at /ui/.
+	// Per configuration-model.md section 5.2: server.enable_ui controls UI availability.
+	// Per security-model.md section 7: Secure cookie when public_endpoint is https://.
+	if cfg.Server.EnableUI {
+		secureCookie := strings.HasPrefix(cfg.Server.PublicEndpoint, "https://")
+		uiStore := uiapi.NewSessionStore(
+			cfg.UI.SessionTTL.Duration,
+			cfg.UI.SessionIdleTTL.Duration,
+		)
+		uiSrv := uiapi.NewServer(db, uiStore, secureCookie)
+		mux.Handle("/ui/", uiapi.WithReadinessGate(state.IsReady, uiSrv.Handler()))
+		log.Printf("ui: session API enabled (secure_cookie=%v)", secureCookie)
+	} else {
+		log.Printf("ui: server.enable_ui=false; /ui/ routes return 404")
+		mux.HandleFunc("/ui/", func(w http.ResponseWriter, r *http.Request) {
+			http.NotFound(w, r)
+		})
+	}
+
+	// S3 service root: registered last so /healthz, /readyz, and /ui/ take precedence.
 	mux.Handle("/", s3srv.Handler())
 
 	log.Printf("hemmins-s3: listening on %s", cfg.Server.Listen)

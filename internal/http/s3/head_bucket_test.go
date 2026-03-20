@@ -109,8 +109,8 @@ func TestRouter_HeadBucket_PathMapping(t *testing.T) {
 		{http.MethodHead, "/routed-bucket", http.StatusOK, "HEAD /existing-bucket → 200"},
 		// HEAD /{missing-bucket} → 404
 		{http.MethodHead, "/no-such-bucket", http.StatusNotFound, "HEAD /missing-bucket → 404"},
-		// HEAD /{bucket}/{key} → object-level → 501
-		{http.MethodHead, "/routed-bucket/some-key", http.StatusNotImplemented, "HEAD /bucket/key → 501"},
+		// HEAD /{bucket}/{key} → object-level → 404 NoSuchKey (key absent)
+		{http.MethodHead, "/routed-bucket/some-key", http.StatusNotFound, "HEAD /bucket/key → NoSuchKey"},
 		// HEAD / → service root → 501
 		{http.MethodHead, "/", http.StatusNotImplemented, "HEAD / → 501"},
 	}

@@ -148,8 +148,8 @@ func TestRouter_DeleteBucket_PathMapping(t *testing.T) {
 		{http.MethodDelete, "/empty-routed", http.StatusNoContent, "DELETE /empty-bucket → 204"},
 		// DELETE /missing-bucket → 404
 		{http.MethodDelete, "/no-such-bucket", http.StatusNotFound, "DELETE /missing → 404"},
-		// DELETE /bucket/key → object-level → 501
-		{http.MethodDelete, "/empty-routed/key", http.StatusNotImplemented, "DELETE /bucket/key → 501"},
+		// DELETE /bucket/key → object-level → 404 NoSuchKey (key absent, bucket exists)
+		{http.MethodDelete, "/empty-routed/key", http.StatusNotFound, "DELETE /bucket/key → NoSuchKey"},
 		// DELETE / → service root → 501
 		{http.MethodDelete, "/", http.StatusNotImplemented, "DELETE / → 501"},
 	}

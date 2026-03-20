@@ -173,6 +173,22 @@ func InitializePaths(cfg *Config) error {
 		)
 	}
 
+	// temp_root and multipart_root must be on the same filesystem.
+	// AtomicWrite creates a temp file in temp_root and renames it into
+	// multipart_root/<upload_id>/ for each UploadPart request.
+	// That rename is only atomic when both paths share the same device.
+	// Per system-architecture.md section 6.1 and 5.3.
+	same, err = sameFilesystem(cfg.Paths.TempRoot, cfg.Paths.MultipartRoot)
+	if err != nil {
+		return fmt.Errorf("checking filesystem for paths.temp_root and paths.multipart_root: %w", err)
+	}
+	if !same {
+		return fmt.Errorf(
+			"paths.temp_root (%q) and paths.multipart_root (%q) must be on the same filesystem (required for atomic rename)",
+			cfg.Paths.TempRoot, cfg.Paths.MultipartRoot,
+		)
+	}
+
 	return nil
 }
 
