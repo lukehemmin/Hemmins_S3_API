@@ -348,3 +348,152 @@ func canonicalQueryStringExcluding(q url.Values, excludeKey string) string {
 	}
 	return CanonicalQueryString(filtered)
 }
+
+// PresignSigner generates presigned S3 URLs for GET and PUT operations.
+// It implements the AWS SigV4 presigned URL signing flow.
+//
+// Per s3-compatibility-matrix.md section 3: Presigned GET and PUT are supported.
+// Per configuration-model.md section 5.3: max_presign_ttl limits X-Amz-Expires.
+type PresignSigner struct {
+	// Region is the S3 region (per s3-compatibility-matrix.md section 2.2).
+	Region string
+
+	// Service is the AWS service name, always "s3" for S3 API.
+	Service string
+
+	// AccessKeyID is the access key ID to use for signing.
+	AccessKeyID string
+
+	// SecretKey is the plaintext secret key. Must NEVER be logged.
+	// Per security-model.md section 4.3.
+	SecretKey string
+
+	// PublicEndpoint is the base URL for generated presigned URLs.
+	// Per configuration-model.md section 5.2: server.public_endpoint.
+	PublicEndpoint string
+
+	// MaxTTL is the maximum allowed X-Amz-Expires duration.
+	// Per configuration-model.md section 5.3: s3.max_presign_ttl.
+	// Zero value falls back to the AWS S3 hard limit (7 days).
+	MaxTTL time.Duration
+
+	// Now returns the current time for signing.
+	// Set to a fixed function in tests for determinism. Defaults to time.Now.
+	Now func() time.Time
+}
+
+// PresignResult holds the result of a presigned URL generation.
+type PresignResult struct {
+	URL            string // The full presigned URL
+	Method         string // GET or PUT
+	ExpiresSeconds int64  // The actual expires value used
+}
+
+// Sign generates a presigned URL for the given bucket, key, method, and expiry.
+//
+// Supported methods: GET, PUT
+// Returns error if:
+//   - method is not GET or PUT
+//   - expiresSeconds <= 0
+//   - expiresSeconds > MaxTTL (or 7 days if MaxTTL is 0)
+//
+// The generated URL uses path-style addressing per s3-compatibility-matrix.md section 2.1.
+// Per security-model.md section 4.3: SecretKey is never logged.
+func (s *PresignSigner) Sign(method, bucket, key string, expiresSeconds int64) (*PresignResult, error) {
+	// Validate method.
+	method = strings.ToUpper(method)
+	if method != "GET" && method != "PUT" {
+		return nil, fmt.Errorf("unsupported method %q: must be GET or PUT", method)
+	}
+
+	// Validate expiresSeconds.
+	if expiresSeconds <= 0 {
+		return nil, fmt.Errorf("expiresSeconds must be positive, got %d", expiresSeconds)
+	}
+	maxTTL := s.effectiveMaxTTL()
+	if time.Duration(expiresSeconds)*time.Second > maxTTL {
+		return nil, fmt.Errorf("%w: %ds exceeds maximum %v",
+			ErrPresignTTLExceeded, expiresSeconds, maxTTL)
+	}
+
+	// Get signing time.
+	now := s.currentTime().UTC()
+	dateStr := now.Format(sigV4DateFormat)   // YYYYMMDD
+	dateTime := now.Format(sigV4DateTimeFormat) // YYYYMMDDTHHMMSSZ
+
+	// Build credential scope.
+	credentialScope := CredentialScope(dateStr, s.Region, s.Service)
+	credential := s.AccessKeyID + "/" + credentialScope
+
+	// Parse public endpoint to extract host.
+	endpointURL, err := url.Parse(s.PublicEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("invalid public endpoint: %w", err)
+	}
+	host := endpointURL.Host
+
+	// Build the canonical URI (path-style).
+	// Per s3-compatibility-matrix.md section 2.1: path-style is the primary mode.
+	// The path is: /{bucket}/{key}
+	// Key may contain slashes; they are URL-encoded.
+	canonicalPath := "/" + bucket + "/" + url.PathEscape(key)
+
+	// Build query parameters (excluding signature, which is computed last).
+	qp := url.Values{}
+	qp.Set("X-Amz-Algorithm", sigV4Algorithm)
+	qp.Set("X-Amz-Credential", credential)
+	qp.Set("X-Amz-Date", dateTime)
+	qp.Set("X-Amz-Expires", strconv.FormatInt(expiresSeconds, 10))
+	qp.Set("X-Amz-SignedHeaders", "host")
+
+	// Build canonical query string (without signature).
+	canonQuery := CanonicalQueryString(qp)
+
+	// Build canonical headers: only "host" is signed for presigned URLs.
+	canonHeaders := "host:" + host + "\n"
+	signedHeaders := "host"
+
+	// Payload hash: UNSIGNED-PAYLOAD for presigned URLs.
+	payloadHash := "UNSIGNED-PAYLOAD"
+
+	// Build canonical request.
+	canonReq := CanonicalRequest(method, canonicalPath, canonQuery, canonHeaders, signedHeaders, payloadHash)
+
+	// Build string-to-sign.
+	sts := StringToSign(dateTime, credentialScope, HashSHA256Hex([]byte(canonReq)))
+
+	// Derive signing key and compute signature.
+	signingKey := DeriveSigningKey(s.SecretKey, dateStr, s.Region, s.Service)
+	signature := ComputeSignature(signingKey, sts)
+
+	// Add signature to query parameters.
+	qp.Set("X-Amz-Signature", signature)
+
+	// Build final URL.
+	// Per s3-compatibility-matrix.md section 2.1: path-style URL.
+	finalURL := s.PublicEndpoint
+	if !strings.HasSuffix(finalURL, "/") {
+		finalURL += "/"
+	}
+	finalURL += bucket + "/" + url.PathEscape(key) + "?" + qp.Encode()
+
+	return &PresignResult{
+		URL:            finalURL,
+		Method:         method,
+		ExpiresSeconds: expiresSeconds,
+	}, nil
+}
+
+func (s *PresignSigner) currentTime() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
+}
+
+func (s *PresignSigner) effectiveMaxTTL() time.Duration {
+	if s.MaxTTL > 0 {
+		return s.MaxTTL
+	}
+	return presignMaxAllowedTTL
+}

@@ -18,10 +18,13 @@ import (
 )
 
 const (
-	testAdminUsername = "testadmin"
-	testAdminPassword = "testpassword123!"
-	testAccessKey     = "AKIATESTUI00000001"
-	testMasterKey     = "test-master-key-for-ui-tests-only"
+	testAdminUsername  = "testadmin"
+	testAdminPassword  = "testpassword123!"
+	testAccessKey      = "AKIATESTUI00000001"
+	testMasterKey      = "test-master-key-for-ui-tests-only"
+	testRootSecretKey  = "testsecret123"
+	testRegion         = "us-east-1"
+	testPublicEndpoint = "http://localhost:9000"
 )
 
 // setupTestUIServer creates a bootstrapped DB, a SessionStore, and a ui.Server.
@@ -57,11 +60,21 @@ func setupTestUIServer(t *testing.T, secureCookie bool) (http.Handler, *metadata
 		t.Fatalf("MkdirAll tempRoot: %v", err)
 	}
 
-	// Create config with storage paths.
+	// Create config with storage paths and presign settings.
 	cfg := &config.Config{
 		Paths: config.PathsConfig{
 			ObjectRoot: objectRoot,
 			TempRoot:   tempRoot,
+		},
+		Server: config.ServerConfig{
+			PublicEndpoint: testPublicEndpoint,
+		},
+		S3: config.S3Config{
+			Region:        testRegion,
+			MaxPresignTTL: config.Duration{Duration: 1 * time.Hour},
+		},
+		Auth: config.AuthConfig{
+			MasterKey: testMasterKey,
 		},
 	}
 

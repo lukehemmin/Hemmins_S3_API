@@ -115,3 +115,75 @@ func TestEncryptSecret_EmptyPlaintext(t *testing.T) {
 		t.Errorf("expected empty string after round-trip, got %q", decrypted)
 	}
 }
+
+func TestGenerateAccessKeyID_Format(t *testing.T) {
+	keyID, err := GenerateAccessKeyID()
+	if err != nil {
+		t.Fatalf("GenerateAccessKeyID: %v", err)
+	}
+
+	// Must be 20 characters (AKIA + 16).
+	if len(keyID) != 20 {
+		t.Errorf("expected length 20, got %d", len(keyID))
+	}
+
+	// Must start with AKIA.
+	if !strings.HasPrefix(keyID, "AKIA") {
+		t.Errorf("expected prefix 'AKIA', got %q", keyID[:4])
+	}
+
+	// All characters after AKIA must be uppercase alphanumeric.
+	suffix := keyID[4:]
+	for _, c := range suffix {
+		if !((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+			t.Errorf("invalid character %q in suffix %q", c, suffix)
+		}
+	}
+}
+
+func TestGenerateAccessKeyID_Uniqueness(t *testing.T) {
+	ids := make(map[string]bool)
+	for i := 0; i < 100; i++ {
+		keyID, err := GenerateAccessKeyID()
+		if err != nil {
+			t.Fatalf("GenerateAccessKeyID: %v", err)
+		}
+		if ids[keyID] {
+			t.Fatalf("duplicate key ID generated: %s", keyID)
+		}
+		ids[keyID] = true
+	}
+}
+
+func TestGenerateSecretAccessKey_Format(t *testing.T) {
+	secret, err := GenerateSecretAccessKey()
+	if err != nil {
+		t.Fatalf("GenerateSecretAccessKey: %v", err)
+	}
+
+	// Must be 40 characters (30 bytes → 40 base64 chars).
+	if len(secret) != 40 {
+		t.Errorf("expected length 40, got %d", len(secret))
+	}
+
+	// Must be valid base64url characters.
+	for _, c := range secret {
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '=') {
+			t.Errorf("invalid base64url character %q in secret", c)
+		}
+	}
+}
+
+func TestGenerateSecretAccessKey_Uniqueness(t *testing.T) {
+	secrets := make(map[string]bool)
+	for i := 0; i < 100; i++ {
+		secret, err := GenerateSecretAccessKey()
+		if err != nil {
+			t.Fatalf("GenerateSecretAccessKey: %v", err)
+		}
+		if secrets[secret] {
+			t.Fatalf("duplicate secret generated")
+		}
+		secrets[secret] = true
+	}
+}

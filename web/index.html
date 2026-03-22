@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hemmins S3 - Admin</title>
+  <link rel="stylesheet" href="/ui/static/style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Setup Required Screen -->
+    <div id="setup-required" class="screen" style="display: none;">
+      <div class="card card-center">
+        <h1>⚙️ Setup Required</h1>
+        <p>서버 초기 설정이 필요합니다.</p>
+        <p class="hint">HEMMINS_BOOTSTRAP_* 환경변수를 설정하고 서버를 재시작하세요.</p>
+        <button onclick="location.reload()">다시 확인</button>
+      </div>
+    </div>
+
+    <!-- Login Screen -->
+    <div id="login-screen" class="screen" style="display: none;">
+      <div class="card card-center">
+        <h1>🔐 Hemmins S3</h1>
+        <form id="login-form">
+          <div class="form-group">
+            <label for="username">사용자명</label>
+            <input type="text" id="username" name="username" autocomplete="username" required>
+          </div>
+          <div class="form-group">
+            <label for="password">비밀번호</label>
+            <input type="password" id="password" name="password" autocomplete="current-password" required>
+          </div>
+          <div id="login-error" class="error" style="display: none;"></div>
+          <button type="submit" id="login-btn">로그인</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- Main Screen (Dashboard) -->
+    <div id="main-screen" class="screen" style="display: none;">
+      <header class="header">
+        <div class="header-left">
+          <h1>Hemmins S3</h1>
+        </div>
+        <div class="header-right">
+          <span id="user-info"></span>
+          <button id="logout-btn" class="btn-secondary">로그아웃</button>
+        </div>
+      </header>
+
+      <nav class="nav">
+        <button class="nav-btn active" data-section="dashboard">대시보드</button>
+        <button class="nav-btn" data-section="buckets">버킷</button>
+        <button class="nav-btn" data-section="objects">오브젝트</button>
+        <button class="nav-btn disabled" data-section="access-keys" disabled>접근 키</button>
+        <button class="nav-btn disabled" data-section="settings" disabled>설정</button>
+      </nav>
+
+      <main class="main-content">
+        <!-- Dashboard Section -->
+        <section id="section-dashboard" class="section">
+          <h2>대시보드</h2>
+          <div class="stats-grid">
+            <div class="stat-card">
+              <div class="stat-value" id="stat-buckets">-</div>
+              <div class="stat-label">버킷</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value" id="stat-objects">-</div>
+              <div class="stat-label">오브젝트</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value" id="stat-size">-</div>
+              <div class="stat-label">총 용량</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value" id="stat-multipart">-</div>
+              <div class="stat-label">진행 중 업로드</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Buckets Section -->
+        <section id="section-buckets" class="section" style="display: none;">
+          <h2>버킷 목록</h2>
+          
+          <!-- Bucket Create Form -->
+          <div class="bucket-create-form">
+            <form id="bucket-create-form">
+              <div class="form-inline">
+                <input type="text" id="bucket-name-input" placeholder="버킷 이름 (3-63자, 소문자/숫자/하이픈)" required>
+                <button type="submit" id="bucket-create-btn">버킷 생성</button>
+              </div>
+            </form>
+          </div>
+          
+          <!-- Error/Success Messages -->
+          <div id="buckets-error" class="error" style="display: none;"></div>
+          <div id="buckets-success" class="success" style="display: none;"></div>
+          
+          <div id="buckets-loading" class="loading">불러오는 중...</div>
+          <div id="buckets-empty" class="empty-state" style="display: none;">
+            버킷이 없습니다.
+          </div>
+          <table id="buckets-table" class="data-table" style="display: none;">
+            <thead>
+              <tr>
+                <th>이름</th>
+                <th>생성일</th>
+                <th class="actions-col">작업</th>
+              </tr>
+            </thead>
+            <tbody id="buckets-tbody"></tbody>
+          </table>
+        </section>
+
+        <!-- Object Browser Section -->
+        <section id="section-objects" class="section" style="display: none;">
+          <h2>오브젝트 브라우저</h2>
+          
+          <!-- Bucket Selection -->
+          <div class="object-browser-controls">
+            <div class="form-group">
+              <label for="object-bucket-select">버킷 선택</label>
+              <select id="object-bucket-select">
+                <option value="">버킷을 선택하세요</option>
+              </select>
+            </div>
+            
+            <div class="object-filter-row">
+              <div class="form-group">
+                <label for="object-prefix-input">Prefix</label>
+                <input type="text" id="object-prefix-input" placeholder="예: folder/">
+              </div>
+              <div class="form-group">
+                <label for="object-delimiter-input">Delimiter</label>
+                <input type="text" id="object-delimiter-input" placeholder="예: /" value="/">
+              </div>
+              <button type="button" id="object-search-btn" class="btn-primary">검색</button>
+            </div>
+          </div>
+          
+          <!-- Breadcrumb for prefix navigation -->
+          <div id="object-breadcrumb" class="object-breadcrumb" style="display: none;"></div>
+          
+          <!-- Error/Success Messages -->
+          <div id="objects-error" class="error" style="display: none;"></div>
+          
+          <!-- Loading State -->
+          <div id="objects-loading" class="loading" style="display: none;">불러오는 중...</div>
+          
+          <!-- Empty State -->
+          <div id="objects-empty" class="empty-state" style="display: none;">
+            오브젝트가 없습니다.
+          </div>
+          
+          <!-- No Bucket Selected State -->
+          <div id="objects-no-bucket" class="empty-state">
+            버킷을 선택해 주세요.
+          </div>
+          
+          <!-- Objects Table -->
+          <table id="objects-table" class="data-table" style="display: none;">
+            <thead>
+              <tr>
+                <th>이름</th>
+                <th>크기</th>
+                <th>수정일</th>
+                <th class="actions-col">작업</th>
+              </tr>
+            </thead>
+            <tbody id="objects-tbody"></tbody>
+          </table>
+          
+          <!-- Pagination -->
+          <div id="objects-pagination" class="pagination" style="display: none;">
+            <span id="objects-count"></span>
+            <button type="button" id="objects-load-more" class="btn-secondary">더 불러오기</button>
+          </div>
+          
+          <!-- Metadata Panel -->
+          <div id="object-meta-panel" class="meta-panel" style="display: none;">
+            <div class="meta-panel-header">
+              <h3>오브젝트 정보</h3>
+              <button type="button" id="object-meta-close" class="btn-close">×</button>
+            </div>
+            <div id="object-meta-content" class="meta-panel-content">
+              <div class="meta-item">
+                <span class="meta-label">버킷</span>
+                <span id="meta-bucket" class="meta-value"></span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-label">키</span>
+                <span id="meta-key" class="meta-value"></span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-label">크기</span>
+                <span id="meta-size" class="meta-value"></span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-label">Content-Type</span>
+                <span id="meta-content-type" class="meta-value"></span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-label">ETag</span>
+                <span id="meta-etag" class="meta-value"></span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-label">수정일</span>
+                <span id="meta-last-modified" class="meta-value"></span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-label">Storage Class</span>
+                <span id="meta-storage-class" class="meta-value"></span>
+              </div>
+              <div id="meta-user-metadata" class="meta-user-section" style="display: none;">
+                <span class="meta-label">사용자 메타데이터</span>
+                <div id="meta-user-metadata-content" class="meta-user-content"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="section-access-keys" class="section" style="display: none;">
+          <h2>접근 키 관리</h2>
+          <p class="placeholder-text">이 기능은 아직 구현되지 않았습니다.</p>
+        </section>
+
+        <section id="section-settings" class="section" style="display: none;">
+          <h2>설정</h2>
+          <p class="placeholder-text">이 기능은 아직 구현되지 않았습니다.</p>
+        </section>
+      </main>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loading-overlay" class="loading-overlay">
+      <div class="spinner"></div>
+    </div>
+  </div>
+
+  <script src="/ui/static/app.js"></script>
+</body>
+</html>

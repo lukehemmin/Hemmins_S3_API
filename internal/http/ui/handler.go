@@ -36,6 +36,13 @@ type Server struct {
 	// Set by SetConfig from the runtime configuration.
 	objectRoot string
 	tempRoot   string
+
+	// Presign configuration for presigned URL generation.
+	// Set by SetConfig from the runtime configuration.
+	publicEndpoint string
+	region         string
+	masterKey      string
+	maxPresignTTL  time.Duration
 }
 
 // NewServer creates a UI Server backed by db using store for session management.
@@ -50,13 +57,17 @@ func NewServer(db *metadata.DB, store *SessionStore, secureCookie bool) *Server 
 }
 
 // SetConfig attaches a read-only configuration view for the settings API
-// and extracts storage paths needed for object upload.
-// Must be called before Handler() if settings API or object upload is needed.
+// and extracts storage paths needed for object upload and presigned URL generation.
+// Must be called before Handler() if settings API, object upload, or presigned URL is needed.
 // Per product-spec.md section 7.4 and configuration-model.md section 10.1.
 func (s *Server) SetConfig(cfg *config.Config) {
 	s.settingsView = NewSettingsView(cfg)
 	s.objectRoot = cfg.Paths.ObjectRoot
 	s.tempRoot = cfg.Paths.TempRoot
+	s.publicEndpoint = cfg.Server.PublicEndpoint
+	s.region = cfg.S3.Region
+	s.masterKey = cfg.Auth.MasterKey
+	s.maxPresignTTL = cfg.S3.MaxPresignTTL.Duration
 }
 
 // Handler returns the http.Handler serving all UI session API routes.
@@ -75,7 +86,14 @@ func (s *Server) SetConfig(cfg *config.Config) {
 //	DELETE /ui/api/buckets/{name}/objects?key=... → delete object (CSRF required)
 //	GET  /ui/api/buckets/{name}/objects/download?key=... → download object
 //	POST /ui/api/buckets/{name}/objects/upload?key=... → upload object (CSRF required)
+//	GET  /ui/api/buckets/{name}/objects/meta?key=... → get object metadata
+//	POST /ui/api/buckets/{name}/objects/presign → generate presigned URL (CSRF required)
 //	GET  /ui/api/settings        → settings and path status
+//	GET  /ui/api/access-keys    → list access keys (session required)
+//	POST /ui/api/access-keys    → create access key (session + CSRF required)
+//	POST /ui/api/access-keys/revoke → revoke access key (session + CSRF required)
+//	POST /ui/api/access-keys/delete → delete access key (session + CSRF required)
+//	POST /ui/api/account/password → change admin password (session + CSRF required)
 //	anything else under /ui/     → 404 Not Found
 //
 // Per security-model.md section 6: state-changing requests require CSRF protection.
@@ -89,10 +107,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/ui/api/buckets", s.handleBuckets)
 	mux.HandleFunc("/ui/api/buckets/", s.handleBucketByName)
 	mux.HandleFunc("/ui/api/settings", s.handleSettings)
-	// Catch-all for unrecognized /ui/* paths.
-	mux.HandleFunc("/ui/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/ui/api/access-keys", s.handleAccessKeys)
+	mux.HandleFunc("/ui/api/access-keys/revoke", s.handleAccessKeysRevoke)
+	mux.HandleFunc("/ui/api/access-keys/delete", s.handleAccessKeysDelete)
+	mux.HandleFunc("/ui/api/account/password", s.handlePasswordChange)
+	// API catch-all: any unrecognized /ui/api/* path returns JSON 404.
+	mux.HandleFunc("/ui/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "not found")
 	})
+	// Static file server for /ui/* (non-API) paths.
+	// Serves index.html for SPA shell and static assets (CSS, JS).
+	// Per implementation-roadmap.md Phase 5: UI shell from same binary.
+	mux.Handle("/ui/", staticFileServer())
 	return mux
 }
 
@@ -471,10 +497,12 @@ func (s *Server) handleBucketsCreate(w http.ResponseWriter, r *http.Request) {
 //   - DELETE /ui/api/buckets/{name}/objects?key=... → delete object (CSRF required)
 //   - GET /ui/api/buckets/{name}/objects/download?key=... → download object
 //   - POST /ui/api/buckets/{name}/objects/upload?key=... → upload object (CSRF required)
+//   - GET /ui/api/buckets/{name}/objects/meta?key=... → get object metadata
+//   - POST /ui/api/buckets/{name}/objects/presign → generate presigned URL (CSRF required)
 //
 // Per product-spec.md section 7.3 and security-model.md section 6.
 func (s *Server) handleBucketByName(w http.ResponseWriter, r *http.Request) {
-	// Extract bucket name and sub-path from: /ui/api/buckets/{name}[/objects[/download|upload]]
+	// Extract bucket name and sub-path from: /ui/api/buckets/{name}[/objects[/download|upload|meta|presign]]
 	const prefix = "/ui/api/buckets/"
 	remainder := strings.TrimPrefix(r.URL.Path, prefix)
 	if remainder == "" {
@@ -496,6 +524,14 @@ func (s *Server) handleBucketByName(w http.ResponseWriter, r *http.Request) {
 		}
 		if subPath == "objects/upload" {
 			s.handleObjectUpload(w, r, bucketName)
+			return
+		}
+		if subPath == "objects/meta" {
+			s.handleObjectMeta(w, r, bucketName)
+			return
+		}
+		if subPath == "objects/presign" {
+			s.handleObjectPresign(w, r, bucketName)
 			return
 		}
 		// Unknown sub-resource.
@@ -1079,6 +1115,312 @@ func (s *Server) handleObjectUpload(w http.ResponseWriter, r *http.Request, buck
 	})
 }
 
+// objectMetaResponse is the JSON response for GET /ui/api/buckets/{name}/objects/meta.
+type objectMetaResponse struct {
+	Bucket       string            `json:"bucket"`
+	Key          string            `json:"key"`
+	Size         int64             `json:"size"`
+	ETag         string            `json:"etag"` // quoted MD5, e.g. "\"d41d8cd98f00b204e9800998ecf8427e\""
+	ContentType  string            `json:"contentType"`
+	LastModified string            `json:"lastModified"` // RFC3339 UTC
+	StorageClass string            `json:"storageClass"`
+	UserMetadata map[string]string `json:"userMetadata"`
+}
+
+// handleObjectMeta implements GET /ui/api/buckets/{name}/objects/meta?key=...
+//
+// Returns metadata for a single object as JSON.
+// Query parameter:
+//   - key: the object key to query (required)
+//
+// Success: 200 JSON with object metadata (bucket, key, size, etag, contentType, lastModified, storageClass, userMetadata).
+// Errors are JSON responses:
+//   - 400: missing key parameter or invalid bucket name
+//   - 401: not authenticated
+//   - 404: bucket or object not found
+//   - 405: method not allowed
+//   - 500: internal error (corrupt object, DB error)
+//
+// Session required; CSRF is NOT required (GET request, read-only).
+// Per product-spec.md section 7.3 ("메타데이터 보기") and security-model.md section 6.
+//
+// Internal fields NOT exposed:
+//   - storage_path (internal filesystem path)
+//   - object_id (internal UUID)
+//   - is_corrupt (internal state flag)
+//   - checksum_sha256 (not used in Phase 2)
+func (s *Server) handleObjectMeta(w http.ResponseWriter, r *http.Request, bucketName string) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// Session required.
+	if _, ok := s.requireSession(w, r); !ok {
+		return
+	}
+
+	// Validate bucket name using S3 rules.
+	if err := s3.ValidateBucketName(bucketName); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid bucket name")
+		return
+	}
+
+	// Get the object key from query parameter.
+	objectKey := r.URL.Query().Get("key")
+	if objectKey == "" {
+		writeJSONError(w, http.StatusBadRequest, "key parameter is required")
+		return
+	}
+
+	// Check bucket exists.
+	exists, err := s.db.BucketExists(bucketName)
+	if err != nil {
+		log.Printf("ERROR handleObjectMeta BucketExists(%q): %v", bucketName, err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if !exists {
+		writeJSONError(w, http.StatusNotFound, "bucket not found")
+		return
+	}
+
+	// Look up object metadata.
+	obj, err := s.db.GetObjectByKey(bucketName, objectKey)
+	if err != nil {
+		if errors.Is(err, metadata.ErrObjectNotFound) {
+			writeJSONError(w, http.StatusNotFound, "object not found")
+			return
+		}
+		if errors.Is(err, metadata.ErrCorruptObject) {
+			// Object is marked corrupt (metadata row exists but blob is missing).
+			// Return a generic 500; do not reveal internal state.
+			log.Printf("ERROR handleObjectMeta corrupt object bucket=%q key=%q", bucketName, objectKey)
+			writeJSONError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		log.Printf("ERROR handleObjectMeta GetObjectByKey(%q, %q): %v", bucketName, objectKey, err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// Parse user metadata from stored metadata_json.
+	// Per s3-compatibility-matrix.md section 5.1: x-amz-meta-* headers.
+	userMeta := make(map[string]string)
+	if obj.MetadataJSON != "" && obj.MetadataJSON != "{}" {
+		if jsonErr := json.Unmarshal([]byte(obj.MetadataJSON), &userMeta); jsonErr != nil {
+			// JSON parse failure: log but continue with empty map (degraded response).
+			log.Printf("WARN handleObjectMeta metadata_json parse error bucket=%q key=%q: %v", bucketName, objectKey, jsonErr)
+		}
+	}
+
+	// Build JSON response.
+	// ETag is quoted per S3 convention, matching list and download behavior.
+	// Per s3-compatibility-matrix.md section 6.2 and objectItem formatting.
+	resp := objectMetaResponse{
+		Bucket:       bucketName,
+		Key:          objectKey,
+		Size:         obj.Size,
+		ETag:         `"` + obj.ETag + `"`,
+		ContentType:  obj.ContentType,
+		LastModified: obj.LastModified.UTC().Format(time.RFC3339),
+		StorageClass: "STANDARD", // Phase 2: always STANDARD per system-architecture.md section 4.2
+		UserMetadata: userMeta,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// presignRequest is the JSON request body for POST /ui/api/buckets/{name}/objects/presign.
+type presignRequest struct {
+	Key            string `json:"key"`
+	Method         string `json:"method"` // GET or PUT
+	ExpiresSeconds int64  `json:"expiresSeconds"`
+}
+
+// presignResponse is the JSON response for POST /ui/api/buckets/{name}/objects/presign.
+type presignResponse struct {
+	URL            string `json:"url"`
+	Method         string `json:"method"`
+	ExpiresSeconds int64  `json:"expiresSeconds"`
+}
+
+// handleObjectPresign implements POST /ui/api/buckets/{name}/objects/presign.
+//
+// Generates a presigned URL for GET or PUT access to an object.
+// Request body:
+//
+//	{
+//	  "key": "path/to/object.txt",
+//	  "method": "GET",  // or "PUT"
+//	  "expiresSeconds": 3600
+//	}
+//
+// Success: 200 JSON with presigned URL:
+//
+//	{
+//	  "url": "http://...",
+//	  "method": "GET",
+//	  "expiresSeconds": 3600
+//	}
+//
+// Errors are JSON responses:
+//   - 400: invalid JSON body, missing key, invalid method, expiresSeconds too large/invalid, invalid bucket name
+//   - 401: not authenticated
+//   - 403: CSRF validation failed
+//   - 404: bucket not found
+//   - 405: method not allowed
+//   - 500: internal error (presign config missing, DB error, signer error)
+//
+// Policies:
+//   - GET presign: Does NOT require object to exist (per S3 behavior)
+//   - PUT presign: Does NOT require object to exist (allows creating new objects)
+//   - expiresSeconds must be positive and <= config.s3.max_presign_ttl
+//
+// Session and CSRF required; per product-spec.md section 7.3 and security-model.md section 6.
+func (s *Server) handleObjectPresign(w http.ResponseWriter, r *http.Request, bucketName string) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// Session required.
+	if _, ok := s.requireSession(w, r); !ok {
+		return
+	}
+
+	// CSRF required for state-changing operations.
+	if !s.requireCSRF(w, r) {
+		return
+	}
+
+	// Validate bucket name using S3 rules.
+	if err := s3.ValidateBucketName(bucketName); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid bucket name")
+		return
+	}
+
+	// Check bucket exists.
+	exists, err := s.db.BucketExists(bucketName)
+	if err != nil {
+		log.Printf("ERROR handleObjectPresign BucketExists(%q): %v", bucketName, err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if !exists {
+		writeJSONError(w, http.StatusNotFound, "bucket not found")
+		return
+	}
+
+	// Parse request body.
+	var body presignRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	// Validate key.
+	if body.Key == "" {
+		writeJSONError(w, http.StatusBadRequest, "key is required")
+		return
+	}
+
+	// Validate method.
+	method := strings.ToUpper(body.Method)
+	if method != "GET" && method != "PUT" {
+		writeJSONError(w, http.StatusBadRequest, "method must be GET or PUT")
+		return
+	}
+
+	// Validate expiresSeconds.
+	if body.ExpiresSeconds <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "expiresSeconds must be positive")
+		return
+	}
+
+	// Check against max TTL.
+	maxTTL := s.maxPresignTTL
+	if maxTTL == 0 {
+		maxTTL = 7 * 24 * time.Hour // AWS default: 7 days
+	}
+	if time.Duration(body.ExpiresSeconds)*time.Second > maxTTL {
+		writeJSONError(w, http.StatusBadRequest, "expiresSeconds exceeds maximum allowed TTL")
+		return
+	}
+
+	// Check that presign configuration is available.
+	if s.publicEndpoint == "" {
+		log.Printf("ERROR handleObjectPresign: public_endpoint not configured")
+		writeJSONError(w, http.StatusInternalServerError, "presign not available")
+		return
+	}
+	if s.region == "" {
+		log.Printf("ERROR handleObjectPresign: region not configured")
+		writeJSONError(w, http.StatusInternalServerError, "presign not available")
+		return
+	}
+	if s.masterKey == "" {
+		log.Printf("ERROR handleObjectPresign: master_key not configured")
+		writeJSONError(w, http.StatusInternalServerError, "presign not available")
+		return
+	}
+
+	// Get the root access key and secret for signing.
+	// Per security-model.md section 8.1: use the root access key for presign generation.
+	accessKey, secretKey, err := s.getRootAccessKey()
+	if err != nil {
+		log.Printf("ERROR handleObjectPresign getRootAccessKey: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// Create signer and generate presigned URL.
+	signer := auth.PresignSigner{
+		Region:         s.region,
+		Service:        "s3",
+		AccessKeyID:    accessKey,
+		SecretKey:      secretKey,
+		PublicEndpoint: s.publicEndpoint,
+		MaxTTL:         maxTTL,
+	}
+
+	result, err := signer.Sign(method, bucketName, body.Key, body.ExpiresSeconds)
+	if err != nil {
+		log.Printf("ERROR handleObjectPresign Sign: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	log.Printf("AUDIT presign_generated bucket=%q key=%q method=%s expires=%d", bucketName, body.Key, method, body.ExpiresSeconds)
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(presignResponse{
+		URL:            result.URL,
+		Method:         result.Method,
+		ExpiresSeconds: result.ExpiresSeconds,
+	})
+}
+
+// getRootAccessKey retrieves the root access key ID and decrypted secret.
+// Per security-model.md section 4.2: secrets are decrypted with auth.master_key.
+// Returns error if no root key exists or decryption fails.
+func (s *Server) getRootAccessKey() (accessKeyID, secretKey string, err error) {
+	// Look up the root access key from the database.
+	rootKey, err := s.db.GetRootAccessKey()
+	if err != nil {
+		return "", "", err
+	}
+
+	// Decrypt the secret using the master key.
+	secret, err := auth.DecryptSecret(s.masterKey, rootKey.SecretCiphertext)
+	if err != nil {
+		return "", "", err
+	}
+
+	return rootKey.AccessKey, secret, nil
+}
+
 // writeJSONError writes a JSON error response.
 func writeJSONError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
@@ -1104,4 +1446,471 @@ func WithReadinessGate(isReady func() bool, inner http.Handler) http.Handler {
 		}
 		inner.ServeHTTP(w, r)
 	})
+}
+
+// handleAccessKeys routes GET and POST for /ui/api/access-keys.
+// Per product-spec.md section 7.4: access key management is part of settings.
+func (s *Server) handleAccessKeys(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.handleAccessKeysList(w, r)
+	case http.MethodPost:
+		s.handleAccessKeysCreate(w, r)
+	default:
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// handleAccessKeysList implements GET /ui/api/access-keys.
+// Returns a JSON array of access key summaries (without secrets).
+// Session required; 401 if not authenticated.
+//
+// Response fields per key:
+//   - accessKey: the access key ID
+//   - status: "active" or "inactive"
+//   - isRoot: boolean
+//   - description: string (may be empty)
+//   - createdAt: RFC3339 timestamp
+//   - lastUsedAt: RFC3339 timestamp or null
+//
+// Per security-model.md section 4.2: secret_ciphertext is NEVER included.
+func (s *Server) handleAccessKeysList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireSession(w, r); !ok {
+		return
+	}
+
+	keys, err := s.db.ListAccessKeys()
+	if err != nil {
+		log.Printf("ERROR handleAccessKeysList ListAccessKeys: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(keys)
+}
+
+// accessKeyCreateRequest is the request body for POST /ui/api/access-keys.
+type accessKeyCreateRequest struct {
+	Description string `json:"description"` // optional, defaults to empty
+}
+
+// accessKeyCreateResponse is the response body for POST /ui/api/access-keys.
+// SecretKey is included ONLY in the create response; it is never shown again.
+// Per security-model.md section 4.2: no secret re-display after creation.
+type accessKeyCreateResponse struct {
+	AccessKey   string `json:"accessKey"`
+	SecretKey   string `json:"secretKey"` // Only in create response, never again
+	Status      string `json:"status"`
+	Description string `json:"description"`
+	CreatedAt   string `json:"createdAt"`
+}
+
+// handleAccessKeysCreate implements POST /ui/api/access-keys.
+// Creates a new non-root service access key.
+//
+// Request body: {"description":"optional description"}
+// Success: 201 Created with JSON {accessKey, secretKey, status, description, createdAt}
+// Errors:
+//   - 400: invalid JSON body
+//   - 401: not authenticated
+//   - 403: CSRF validation failed
+//   - 500: internal error
+//
+// Per product-spec.md section 8.1: service keys are non-root (is_root=false).
+// Per security-model.md sections 4.2 and 8: secret is shown once, key creation is audited.
+func (s *Server) handleAccessKeysCreate(w http.ResponseWriter, r *http.Request) {
+	// Session required.
+	if _, ok := s.requireSession(w, r); !ok {
+		return
+	}
+
+	// CSRF required for state-changing operations.
+	if !s.requireCSRF(w, r) {
+		return
+	}
+
+	var body accessKeyCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		// Empty body or parse error both result in default empty description.
+		// Only reject if the body is malformed JSON that's not empty.
+		if err.Error() != "EOF" {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+	}
+
+	// Generate new access key ID.
+	accessKeyID, err := auth.GenerateAccessKeyID()
+	if err != nil {
+		log.Printf("ERROR handleAccessKeysCreate GenerateAccessKeyID: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// Generate new secret access key.
+	secretKey, err := auth.GenerateSecretAccessKey()
+	if err != nil {
+		log.Printf("ERROR handleAccessKeysCreate GenerateSecretAccessKey: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// Encrypt secret with master key before storing.
+	// Per security-model.md section 4.2: plaintext secrets are never stored.
+	ciphertext, err := auth.EncryptSecret(s.masterKey, secretKey)
+	if err != nil {
+		log.Printf("ERROR handleAccessKeysCreate EncryptSecret: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// Create the access key in the database.
+	summary, err := s.db.CreateAccessKey(accessKeyID, ciphertext, body.Description)
+	if err != nil {
+		if errors.Is(err, metadata.ErrAccessKeyAlreadyExists) {
+			// This should be extremely rare due to random generation, but handle it.
+			writeJSONError(w, http.StatusConflict, "access key already exists")
+			return
+		}
+		log.Printf("ERROR handleAccessKeysCreate CreateAccessKey: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// Audit log: key creation event (without secret).
+	// Per security-model.md section 8: key creation is an auditable event.
+	log.Printf("AUDIT access_key_created access_key=%s is_root=false description=%q", accessKeyID, body.Description)
+
+	// Return 201 Created with the access key and secret.
+	// Per security-model.md section 4.2: secretKey is returned only this once.
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(accessKeyCreateResponse{
+		AccessKey:   summary.AccessKey,
+		SecretKey:   secretKey, // Only time the secret is shown
+		Status:      summary.Status,
+		Description: summary.Description,
+		CreatedAt:   summary.CreatedAt.Format(time.RFC3339),
+	})
+}
+
+// accessKeyRevokeRequest is the request body for POST /ui/api/access-keys/revoke.
+type accessKeyRevokeRequest struct {
+	AccessKey string `json:"accessKey"` // required: the access key ID to revoke
+}
+
+// accessKeyRevokeResponse is the response body for POST /ui/api/access-keys/revoke.
+// Per security-model.md section 4.2: secret/ciphertext fields are NEVER included.
+type accessKeyRevokeResponse struct {
+	AccessKey string `json:"accessKey"`
+	Status    string `json:"status"`
+}
+
+// handleAccessKeysRevoke implements POST /ui/api/access-keys/revoke.
+// Revokes (deactivates) an access key by setting its status to "inactive".
+// Session required; CSRF required.
+//
+// Request body: {"accessKey": "AKIA..."}
+// Success: 200 OK with JSON {accessKey, status: "inactive"}
+// Errors:
+//   - 400: missing accessKey field
+//   - 401: not authenticated
+//   - 403: CSRF validation failed OR attempting to revoke root key
+//   - 404: access key not found
+//   - 405: method not allowed (only POST)
+//   - 500: internal error
+//
+// Policy decisions:
+//   - Root key revocation is rejected (403 Forbidden) per security-model.md section 5.1
+//   - Already inactive keys return success (idempotent)
+//
+// Per security-model.md section 5.1: key deactivation is an auditable event.
+// Per security-model.md section 4.3: secret/ciphertext must NEVER appear in logs or responses.
+func (s *Server) handleAccessKeysRevoke(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// Session required.
+	if _, ok := s.requireSession(w, r); !ok {
+		return
+	}
+
+	// CSRF required for state-changing operations.
+	if !s.requireCSRF(w, r) {
+		return
+	}
+
+	var body accessKeyRevokeRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	if body.AccessKey == "" {
+		writeJSONError(w, http.StatusBadRequest, "accessKey is required")
+		return
+	}
+
+	// Revoke the access key.
+	summary, err := s.db.RevokeAccessKey(body.AccessKey)
+	if err != nil {
+		if errors.Is(err, metadata.ErrAccessKeyNotFound) {
+			writeJSONError(w, http.StatusNotFound, "access key not found")
+			return
+		}
+		if errors.Is(err, metadata.ErrCannotRevokeRootKey) {
+			// Per security-model.md section 5.1: at least one active root key must be maintained.
+			writeJSONError(w, http.StatusForbidden, "cannot revoke root access key")
+			return
+		}
+		log.Printf("ERROR handleAccessKeysRevoke RevokeAccessKey: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// Audit log: key revocation event (without secret).
+	// Per security-model.md section 8: key deactivation is an auditable event.
+	log.Printf("AUDIT access_key_revoked access_key=%s", body.AccessKey)
+
+	// Return 200 OK with the revoked key summary.
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(accessKeyRevokeResponse{
+		AccessKey: summary.AccessKey,
+		Status:    summary.Status,
+	})
+}
+
+// accessKeyDeleteRequest is the request body for POST /ui/api/access-keys/delete.
+type accessKeyDeleteRequest struct {
+	AccessKey string `json:"accessKey"` // required: the access key ID to delete
+}
+
+// accessKeyDeleteResponse is the response body for POST /ui/api/access-keys/delete.
+// Per security-model.md section 4.2: secret/ciphertext fields are NEVER included.
+type accessKeyDeleteResponse struct {
+	AccessKey string `json:"accessKey"`
+	Deleted   bool   `json:"deleted"`
+}
+
+// handleAccessKeysDelete implements POST /ui/api/access-keys/delete.
+// Permanently deletes an access key row from the database.
+// Session required; CSRF required.
+//
+// Request body: {"accessKey": "AKIA..."}
+// Success: 200 OK with JSON {accessKey, deleted: true}
+// Errors:
+//   - 400: missing accessKey field
+//   - 401: not authenticated
+//   - 403: CSRF validation failed OR attempting to delete root key
+//   - 404: access key not found
+//   - 405: method not allowed (only POST)
+//   - 409: attempting to delete active key (must revoke first)
+//   - 500: internal error
+//
+// Policy decisions (per security-model.md section 5.1):
+//   - Root key deletion is rejected (403 Forbidden)
+//   - Active key deletion is rejected (409 Conflict) — must revoke first
+//   - Only inactive non-root keys can be deleted
+//
+// Per security-model.md section 8: key deletion is an auditable event.
+// Per security-model.md section 4.3: secret/ciphertext must NEVER appear in logs or responses.
+func (s *Server) handleAccessKeysDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// Session required.
+	if _, ok := s.requireSession(w, r); !ok {
+		return
+	}
+
+	// CSRF required for state-changing operations.
+	if !s.requireCSRF(w, r) {
+		return
+	}
+
+	var body accessKeyDeleteRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	if body.AccessKey == "" {
+		writeJSONError(w, http.StatusBadRequest, "accessKey is required")
+		return
+	}
+
+	// Delete the access key.
+	err := s.db.DeleteAccessKey(body.AccessKey)
+	if err != nil {
+		if errors.Is(err, metadata.ErrAccessKeyNotFound) {
+			writeJSONError(w, http.StatusNotFound, "access key not found")
+			return
+		}
+		if errors.Is(err, metadata.ErrCannotDeleteRootKey) {
+			// Per security-model.md section 5.1: root keys cannot be deleted.
+			writeJSONError(w, http.StatusForbidden, "cannot delete root access key")
+			return
+		}
+		if errors.Is(err, metadata.ErrCannotDeleteActiveKey) {
+			// Per security-model.md section 5.1: must revoke before delete.
+			writeJSONError(w, http.StatusConflict, "cannot delete active access key; revoke first")
+			return
+		}
+		log.Printf("ERROR handleAccessKeysDelete DeleteAccessKey: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// Audit log: key deletion event (without secret).
+	// Per security-model.md section 8: key deletion is an auditable event.
+	log.Printf("AUDIT access_key_deleted access_key=%s", body.AccessKey)
+
+	// Return 200 OK with the deletion confirmation.
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(accessKeyDeleteResponse{
+		AccessKey: body.AccessKey,
+		Deleted:   true,
+	})
+}
+
+// passwordChangeRequest is the request body for POST /ui/api/account/password.
+type passwordChangeRequest struct {
+	CurrentPassword string `json:"currentPassword"`
+	NewPassword     string `json:"newPassword"`
+}
+
+// passwordChangeResponse is the response body for POST /ui/api/account/password.
+type passwordChangeResponse struct {
+	Changed bool `json:"changed"`
+}
+
+// handlePasswordChange implements POST /ui/api/account/password.
+//
+// Changes the password for the currently logged-in admin user.
+//
+// Request body:
+//
+//	{
+//	  "currentPassword": "...",
+//	  "newPassword": "..."
+//	}
+//
+// Responses:
+//   - 200: {"changed": true} — password changed successfully
+//   - 400: missing or invalid request body, empty newPassword
+//   - 401: not authenticated (no valid session)
+//   - 403: CSRF validation failed, or currentPassword mismatch
+//   - 405: method not allowed (only POST)
+//   - 500: internal error
+//
+// Per security-model.md section 4.1: passwords are stored as argon2id hashes.
+// Per security-model.md section 5.2: password change invalidates existing sessions.
+// Per security-model.md section 8: password change is an auditable event.
+//
+// Session invalidation policy:
+// All sessions for the user are invalidated upon password change, not just the current one.
+// This is the conservative approach: if the password was compromised, attacker sessions
+// should also be terminated. The user must log in again after changing password.
+func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// Session required — must be logged in to change password.
+	sess, ok := s.requireSession(w, r)
+	if !ok {
+		return
+	}
+
+	// CSRF required for state-changing operations.
+	if !s.requireCSRF(w, r) {
+		return
+	}
+
+	var body passwordChangeRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	// Validate input — do not log password values.
+	if body.CurrentPassword == "" {
+		writeJSONError(w, http.StatusBadRequest, "currentPassword is required")
+		return
+	}
+	if body.NewPassword == "" {
+		writeJSONError(w, http.StatusBadRequest, "newPassword is required")
+		return
+	}
+
+	// Retrieve user from DB to get current password hash.
+	user, err := s.db.LookupUIUser(sess.Username)
+	if err != nil {
+		// Should not happen for a valid session, but handle gracefully.
+		if errors.Is(err, metadata.ErrUserNotFound) {
+			log.Printf("ERROR handlePasswordChange user %q from session not found in DB", sess.Username)
+			writeJSONError(w, http.StatusUnauthorized, "not authenticated")
+			return
+		}
+		log.Printf("ERROR handlePasswordChange LookupUIUser(%q): %v", sess.Username, err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// Verify current password.
+	// Per security-model.md section 5.2: password change requires re-authentication.
+	match, err := auth.VerifyPassword(body.CurrentPassword, user.PasswordHash)
+	if err != nil {
+		log.Printf("ERROR handlePasswordChange VerifyPassword for user %q: %v", sess.Username, err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if !match {
+		// Do not disclose that it was specifically the password that was wrong.
+		// Use 403 Forbidden to distinguish from 401 (no session).
+		log.Printf("AUDIT password_change_failure username=%q reason=bad_current_password", sess.Username)
+		writeJSONError(w, http.StatusForbidden, "current password is incorrect")
+		return
+	}
+
+	// Hash the new password.
+	newHash, err := auth.HashPassword(body.NewPassword)
+	if err != nil {
+		log.Printf("ERROR handlePasswordChange HashPassword: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// Update password in database.
+	if err := s.db.UpdateUIUserPassword(sess.Username, newHash); err != nil {
+		if errors.Is(err, metadata.ErrUserNotFound) {
+			// Race condition: user was deleted between session check and update.
+			log.Printf("ERROR handlePasswordChange user %q disappeared during update", sess.Username)
+			writeJSONError(w, http.StatusUnauthorized, "not authenticated")
+			return
+		}
+		log.Printf("ERROR handlePasswordChange UpdateUIUserPassword(%q): %v", sess.Username, err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// Invalidate ALL sessions for this user.
+	// Per security-model.md section 5.2: password change invalidates existing sessions.
+	// This includes the current session — user must log in again.
+	deleted := s.store.DeleteByUsername(sess.Username)
+	log.Printf("AUDIT password_changed username=%q sessions_invalidated=%d", sess.Username, deleted)
+
+	// Clear the session cookie to help the browser forget the now-invalid session.
+	http.SetCookie(w, s.clearSessionCookie())
+	clearCSRFCookie(w, s.secureCookie)
+
+	// Return success response.
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(passwordChangeResponse{Changed: true})
 }

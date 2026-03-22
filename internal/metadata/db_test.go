@@ -673,6 +673,85 @@ func TestTouchAccessKeyLastUsed_UpdatesTimestamp(t *testing.T) {
 	}
 }
 
+// TestListAccessKeys_SortOrderAndFields verifies ListAccessKeys returns all keys
+// sorted by created_at ASC, access_key ASC, and does NOT include secret_ciphertext.
+func TestListAccessKeys_SortOrderAndFields(t *testing.T) {
+	db := openTestDB(t)
+
+	// Insert keys in reverse order to test sorting.
+	// Key3 (oldest), Key1 (same time as Key2, but comes later lexically), Key2
+	_, err := db.sqldb.Exec(`
+		INSERT INTO access_keys (access_key, secret_ciphertext, status, is_root, description, created_at, last_used_at)
+		VALUES 
+		('AKIA_C', 'v1:n:c', 'active', 1, 'root key', '2024-01-03T00:00:00Z', NULL),
+		('AKIA_B', 'v1:n:c', 'inactive', 0, 'old key', '2024-01-01T00:00:00Z', '2024-01-02T00:00:00Z'),
+		('AKIA_A', 'v1:n:c', 'active', 0, 'service key', '2024-01-01T00:00:00Z', NULL)`)
+	if err != nil {
+		t.Fatalf("inserting test keys: %v", err)
+	}
+
+	keys, err := db.ListAccessKeys()
+	if err != nil {
+		t.Fatalf("ListAccessKeys: %v", err)
+	}
+
+	if len(keys) != 3 {
+		t.Fatalf("expected 3 keys, got %d", len(keys))
+	}
+
+	// Expected order: AKIA_A (oldest, A < B), AKIA_B (same time, B), AKIA_C (newest)
+	expected := []string{"AKIA_A", "AKIA_B", "AKIA_C"}
+	for i, exp := range expected {
+		if keys[i].AccessKey != exp {
+			t.Errorf("position %d: got %q, want %q", i, keys[i].AccessKey, exp)
+		}
+	}
+
+	// Verify all fields are populated correctly.
+	if keys[0].Status != "active" {
+		t.Errorf("keys[0].Status: got %q, want %q", keys[0].Status, "active")
+	}
+	if keys[0].IsRoot != false {
+		t.Errorf("keys[0].IsRoot: got %v, want false", keys[0].IsRoot)
+	}
+	if keys[0].Description != "service key" {
+		t.Errorf("keys[0].Description: got %q, want %q", keys[0].Description, "service key")
+	}
+	if keys[0].CreatedAt.IsZero() {
+		t.Error("keys[0].CreatedAt should not be zero")
+	}
+	if keys[0].LastUsedAt != nil {
+		t.Errorf("keys[0].LastUsedAt: expected nil, got %v", keys[0].LastUsedAt)
+	}
+
+	// Key B should have LastUsedAt set.
+	if keys[1].LastUsedAt == nil {
+		t.Error("keys[1].LastUsedAt: expected non-nil, got nil")
+	}
+
+	// Key C is root.
+	if !keys[2].IsRoot {
+		t.Error("keys[2].IsRoot should be true")
+	}
+}
+
+// TestListAccessKeys_EmptyDB returns empty slice (not nil).
+func TestListAccessKeys_EmptyDB(t *testing.T) {
+	db := openTestDB(t)
+
+	keys, err := db.ListAccessKeys()
+	if err != nil {
+		t.Fatalf("ListAccessKeys: %v", err)
+	}
+
+	if keys == nil {
+		t.Error("expected empty slice, got nil")
+	}
+	if len(keys) != 0 {
+		t.Errorf("expected 0 keys, got %d", len(keys))
+	}
+}
+
 // openTestDB creates a fresh in-memory SQLite DB for each test.
 func openTestDB(t *testing.T) *DB {
 	t.Helper()
@@ -683,4 +762,91 @@ func openTestDB(t *testing.T) *DB {
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
+}
+
+// TestCreateAccessKey_Success creates a new access key and verifies the returned summary.
+func TestCreateAccessKey_Success(t *testing.T) {
+	db := openTestDB(t)
+
+	summary, err := db.CreateAccessKey("AKIATEST00000001", "v1:nonce:ciphertext", "my service key")
+	if err != nil {
+		t.Fatalf("CreateAccessKey: %v", err)
+	}
+
+	if summary.AccessKey != "AKIATEST00000001" {
+		t.Errorf("expected AccessKey %q, got %q", "AKIATEST00000001", summary.AccessKey)
+	}
+	if summary.Status != "active" {
+		t.Errorf("expected Status 'active', got %q", summary.Status)
+	}
+	if summary.IsRoot {
+		t.Error("expected IsRoot=false for created key")
+	}
+	if summary.Description != "my service key" {
+		t.Errorf("expected Description %q, got %q", "my service key", summary.Description)
+	}
+	if summary.CreatedAt.IsZero() {
+		t.Error("CreatedAt should not be zero")
+	}
+	if summary.LastUsedAt != nil {
+		t.Errorf("expected LastUsedAt=nil, got %v", summary.LastUsedAt)
+	}
+
+	// Verify in DB.
+	var stored struct {
+		accessKey   string
+		ciphertext  string
+		status      string
+		isRoot      int
+		description string
+	}
+	err = db.sqldb.QueryRow(
+		"SELECT access_key, secret_ciphertext, status, is_root, description FROM access_keys WHERE access_key = ?",
+		"AKIATEST00000001",
+	).Scan(&stored.accessKey, &stored.ciphertext, &stored.status, &stored.isRoot, &stored.description)
+	if err != nil {
+		t.Fatalf("querying DB: %v", err)
+	}
+
+	if stored.ciphertext != "v1:nonce:ciphertext" {
+		t.Errorf("expected ciphertext %q, got %q", "v1:nonce:ciphertext", stored.ciphertext)
+	}
+	if stored.status != "active" {
+		t.Errorf("expected status 'active', got %q", stored.status)
+	}
+	if stored.isRoot != 0 {
+		t.Errorf("expected is_root=0, got %d", stored.isRoot)
+	}
+}
+
+// TestCreateAccessKey_Duplicate returns ErrAccessKeyAlreadyExists.
+func TestCreateAccessKey_Duplicate(t *testing.T) {
+	db := openTestDB(t)
+
+	_, err := db.CreateAccessKey("AKIADUPE00000001", "v1:a:b", "first")
+	if err != nil {
+		t.Fatalf("first CreateAccessKey: %v", err)
+	}
+
+	_, err = db.CreateAccessKey("AKIADUPE00000001", "v1:c:d", "second")
+	if err == nil {
+		t.Fatal("expected error for duplicate key")
+	}
+	if err != ErrAccessKeyAlreadyExists {
+		t.Errorf("expected ErrAccessKeyAlreadyExists, got %v", err)
+	}
+}
+
+// TestCreateAccessKey_EmptyDescription works fine.
+func TestCreateAccessKey_EmptyDescription(t *testing.T) {
+	db := openTestDB(t)
+
+	summary, err := db.CreateAccessKey("AKIAEMPTYDESC001", "v1:x:y", "")
+	if err != nil {
+		t.Fatalf("CreateAccessKey: %v", err)
+	}
+
+	if summary.Description != "" {
+		t.Errorf("expected empty description, got %q", summary.Description)
+	}
 }

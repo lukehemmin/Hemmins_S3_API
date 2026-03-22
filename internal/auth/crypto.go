@@ -97,3 +97,41 @@ func deriveAESKey(masterKey string) []byte {
 	h.Write([]byte(masterKey))
 	return h.Sum(nil)
 }
+
+// GenerateAccessKeyID generates a new access key ID in AWS-compatible format.
+// Format: "AKIA" prefix + 16 random uppercase alphanumeric characters = 20 characters total.
+// The AKIA prefix indicates a long-term access key.
+// This matches the AWS access key ID format for compatibility with S3 clients.
+func GenerateAccessKeyID() (string, error) {
+	const (
+		prefix     = "AKIA"
+		suffixLen  = 16
+		charset    = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+		charsetLen = byte(len(charset))
+	)
+
+	b := make([]byte, suffixLen)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generating access key ID: %w", err)
+	}
+
+	for i := range b {
+		b[i] = charset[b[i]%charsetLen]
+	}
+
+	return prefix + string(b), nil
+}
+
+// GenerateSecretAccessKey generates a new secret access key.
+// Format: 40 characters of URL-safe base64-encoded random bytes.
+// This matches the typical AWS secret access key format.
+func GenerateSecretAccessKey() (string, error) {
+	const secretBytes = 30 // 30 bytes → 40 base64 chars
+
+	b := make([]byte, secretBytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generating secret access key: %w", err)
+	}
+
+	return base64.URLEncoding.EncodeToString(b), nil
+}

@@ -115,3 +115,26 @@ func (s *SessionStore) Delete(id string) {
 	delete(s.sessions, id)
 	s.mu.Unlock()
 }
+
+// DeleteByUsername removes all sessions for the given username.
+// Returns the number of sessions deleted.
+// Per security-model.md section 5.2: password change invalidates all existing sessions.
+//
+// Policy rationale:
+// - Conservative approach: invalidate ALL sessions for the user whose password changed.
+// - In-memory store makes per-user scan O(n) but acceptable for admin-only tool.
+// - More secure than only invalidating the "current" session — password theft
+//   scenarios often involve attacker sessions that should also be terminated.
+func (s *SessionStore) DeleteByUsername(username string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var deleted int
+	for id, sess := range s.sessions {
+		if sess.Username == username {
+			delete(s.sessions, id)
+			deleted++
+		}
+	}
+	return deleted
+}

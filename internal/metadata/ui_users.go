@@ -52,3 +52,26 @@ func (db *DB) TouchUIUserLastLogin(username string) error {
 	}
 	return nil
 }
+
+// UpdateUIUserPassword updates the password_hash for username.
+// The newPasswordHash must be an argon2id hash from auth.HashPassword.
+// Returns ErrUserNotFound if no such user exists.
+// Per security-model.md section 4.1: plaintext passwords must never be stored.
+// Per security-model.md section 5.2: password change requires session invalidation (caller responsibility).
+func (db *DB) UpdateUIUserPassword(username, newPasswordHash string) error {
+	result, err := db.sqldb.Exec(
+		"UPDATE ui_users SET password_hash = ? WHERE username = ?",
+		newPasswordHash, username,
+	)
+	if err != nil {
+		return fmt.Errorf("updating password for user %q: %w", username, err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("checking rows affected for user %q: %w", username, err)
+	}
+	if rows == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
