@@ -33,7 +33,12 @@ type Server struct {
 	secureCookie bool // true when server.public_endpoint starts with "https://"
 	settingsView *SettingsView
 
-	// reloadMu protects publicEndpoint and maxPresignTTL during hot-reload.
+	// saveMu serializes the entire settings save transaction (read cfg → build candidate →
+	// validate → write file → runtime reload). This prevents concurrent saves from
+	// producing divergent file/runtime state.
+	saveMu sync.Mutex
+
+	// reloadMu protects publicEndpoint, maxPresignTTL, and secureCookie during hot-reload.
 	// region and masterKey are never hot-reloaded (require restart).
 	reloadMu sync.RWMutex
 
@@ -92,6 +97,15 @@ func (s *Server) getPublicEndpoint() string {
 func (s *Server) getMaxPresignTTL() time.Duration {
 	s.reloadMu.RLock()
 	v := s.maxPresignTTL
+	s.reloadMu.RUnlock()
+	return v
+}
+
+// getSecureCookie returns the current secure-cookie policy, safe for concurrent use.
+// secureCookie may be updated by applyRuntimeReload when server.public_endpoint changes.
+func (s *Server) getSecureCookie() bool {
+	s.reloadMu.RLock()
+	v := s.secureCookie
 	s.reloadMu.RUnlock()
 	return v
 }
@@ -291,7 +305,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	// Clear the cookie regardless of whether a session existed.
 	http.SetCookie(w, s.clearSessionCookie())
 	// Also clear the CSRF cookie on logout.
-	clearCSRFCookie(w, s.secureCookie)
+	clearCSRFCookie(w, s.getSecureCookie())
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -313,7 +327,7 @@ func (s *Server) newSessionCookie(sessionID string) *http.Cookie {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   s.secureCookie,
+		Secure:   s.getSecureCookie(),
 	}
 }
 
@@ -326,7 +340,7 @@ func (s *Server) clearSessionCookie() *http.Cookie {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   s.secureCookie,
+		Secure:   s.getSecureCookie(),
 		MaxAge:   -1, // instructs browser to delete the cookie (serialized as Max-Age=0)
 	}
 }
@@ -358,7 +372,7 @@ func (s *Server) handleCSRF(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	setCSRFCookie(w, token, s.secureCookie)
+	setCSRFCookie(w, token, s.getSecureCookie())
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"token": token,
@@ -1937,7 +1951,7 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 
 	// Clear the session cookie to help the browser forget the now-invalid session.
 	http.SetCookie(w, s.clearSessionCookie())
-	clearCSRFCookie(w, s.secureCookie)
+	clearCSRFCookie(w, s.getSecureCookie())
 
 	// Return success response.
 	w.Header().Set("Content-Type", "application/json")

@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1597,4 +1599,446 @@ func doGetCSRF(t *testing.T, handler http.Handler, cookies []*http.Cookie) *http
 // contains is a simple substring check.
 func contains(s, substr string) bool {
 	return len(s) > 0 && len(substr) > 0 && bytes.Contains([]byte(s), []byte(substr))
+}
+
+// setupTestUIServerForCookieReload creates a test server with a writable config file
+// using the given initial public endpoint. secureCookie is derived from the endpoint scheme,
+// matching the logic in cmd/server/main.go.
+func setupTestUIServerForCookieReload(t *testing.T, initialEndpoint string) (http.Handler, string) {
+	t.Helper()
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.yaml")
+
+	cfg := &config.Config{
+		Version: 1,
+		Server: config.ServerConfig{
+			Listen:         ":9000",
+			PublicEndpoint: initialEndpoint,
+			EnableUI:       true,
+		},
+		S3: config.S3Config{
+			Region:        "us-east-1",
+			MaxPresignTTL: config.Duration{Duration: 24 * time.Hour},
+		},
+		Paths: config.PathsConfig{
+			MetaDB:        filepath.Join(tempDir, "meta", "metadata.db"),
+			ObjectRoot:    filepath.Join(tempDir, "objects"),
+			MultipartRoot: filepath.Join(tempDir, "multipart"),
+			TempRoot:      filepath.Join(tempDir, "tmp"),
+			LogRoot:       filepath.Join(tempDir, "logs"),
+		},
+		Auth: config.AuthConfig{
+			MasterKey: "test-master-key-32-bytes-minimum!",
+		},
+		UI: config.UIConfig{
+			SessionTTL:     config.Duration{Duration: 12 * time.Hour},
+			SessionIdleTTL: config.Duration{Duration: 30 * time.Minute},
+		},
+		Logging: config.LoggingConfig{
+			Level:     "info",
+			AccessLog: true,
+		},
+		GC: config.GCConfig{
+			OrphanScanInterval: config.Duration{Duration: 24 * time.Hour},
+			OrphanGracePeriod:  config.Duration{Duration: 1 * time.Hour},
+			MultipartExpiry:    config.Duration{Duration: 24 * time.Hour},
+		},
+		ConfigFilePath:     configPath,
+		ConfigFileReadOnly: false,
+	}
+
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	db, err := metadata.Open(":memory:")
+	if err != nil {
+		t.Fatalf("metadata.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	pwHash, err := auth.HashPassword(testAdminPassword)
+	if err != nil {
+		t.Fatalf("auth.HashPassword: %v", err)
+	}
+	ciphertext, err := auth.EncryptSecret(testMasterKey, "testsecret123")
+	if err != nil {
+		t.Fatalf("auth.EncryptSecret: %v", err)
+	}
+	if err := db.Bootstrap(testAdminUsername, pwHash, testAccessKey, ciphertext); err != nil {
+		t.Fatalf("db.Bootstrap: %v", err)
+	}
+
+	// Derive secureCookie from endpoint scheme, matching cmd/server/main.go.
+	secureCookie := strings.HasPrefix(initialEndpoint, "https://")
+	store := ui.NewSessionStore(12*time.Hour, 30*time.Minute)
+	srv := ui.NewServer(db, store, secureCookie)
+	srv.SetConfig(cfg)
+	return srv.Handler(), configPath
+}
+
+// TestSecureCookieParity_HttpToHttps verifies that changing server.publicEndpoint from
+// http:// to https:// via settings save immediately updates the Secure attribute on
+// all subsequent CSRF, session, and logout cookies without restarting.
+// Per security-model.md section 7: Secure cookie required when public endpoint is https://.
+func TestSecureCookieParity_HttpToHttps(t *testing.T) {
+	handler, _ := setupTestUIServerForCookieReload(t, "http://localhost:9000")
+
+	// --- Pre-save: cookies must NOT have Secure flag ---
+	csrfRR := doCSRF(t, handler)
+	if c := findCSRFCookie(csrfRR); c == nil {
+		t.Fatal("pre-save: no CSRF cookie")
+	} else if c.Secure {
+		t.Error("pre-save: CSRF cookie must not have Secure flag for http endpoint")
+	}
+
+	loginRR := doLogin(t, handler, testAdminUsername, testAdminPassword)
+	if loginRR.Code != http.StatusOK {
+		t.Fatalf("pre-save login failed: %d", loginRR.Code)
+	}
+	if c := findSessionCookie(loginRR); c == nil {
+		t.Fatal("pre-save: no session cookie")
+	} else if c.Secure {
+		t.Error("pre-save: session cookie must not have Secure flag for http endpoint")
+	}
+
+	// --- Save: change publicEndpoint to https:// ---
+	loginCookies := loginRR.Result().Cookies()
+	csrfGetRR := doGetCSRF(t, handler, loginCookies)
+	if csrfGetRR.Code != http.StatusOK {
+		t.Fatalf("get CSRF failed: %d", csrfGetRR.Code)
+	}
+	var csrfResp map[string]string
+	if err := json.Unmarshal(csrfGetRR.Body.Bytes(), &csrfResp); err != nil {
+		t.Fatalf("parsing CSRF response: %v", err)
+	}
+	saveCookies := append(loginCookies, csrfGetRR.Result().Cookies()...)
+	saveRR := doSettingsSave(t, handler, saveCookies, csrfResp["token"], map[string]interface{}{
+		"server": map[string]interface{}{"publicEndpoint": "https://example.com"},
+	})
+	if saveRR.Code != http.StatusOK {
+		t.Fatalf("save failed: %d: %s", saveRR.Code, saveRR.Body.String())
+	}
+
+	// --- Post-save: cookies must have Secure=true ---
+
+	// CSRF cookie after reload.
+	csrfRR2 := doCSRF(t, handler)
+	if c := findCSRFCookie(csrfRR2); c == nil {
+		t.Fatal("post-save: no CSRF cookie")
+	} else if !c.Secure {
+		t.Error("post-save: CSRF cookie must have Secure=true after http→https reload")
+	}
+
+	// Session cookie after reload.
+	loginRR2 := doLogin(t, handler, testAdminUsername, testAdminPassword)
+	if loginRR2.Code != http.StatusOK {
+		t.Fatalf("post-save login failed: %d", loginRR2.Code)
+	}
+	if c := findSessionCookie(loginRR2); c == nil {
+		t.Fatal("post-save: no session cookie")
+	} else if !c.Secure {
+		t.Error("post-save: session cookie must have Secure=true after http→https reload")
+	}
+
+	// Logout clear cookies after reload.
+	logoutRR := doLogout(t, handler, loginRR2.Result().Cookies())
+	if logoutRR.Code != http.StatusNoContent {
+		t.Fatalf("post-save logout failed: %d", logoutRR.Code)
+	}
+	if c := findSessionCookie(logoutRR); c != nil && !c.Secure {
+		t.Error("post-save: logout session clear cookie must have Secure=true after http→https reload")
+	}
+	if c := findCSRFCookie(logoutRR); c != nil && !c.Secure {
+		t.Error("post-save: logout CSRF clear cookie must have Secure=true after http→https reload")
+	}
+}
+
+// TestSecureCookieParity_HttpsToHttp verifies that changing server.publicEndpoint from
+// https:// to http:// via settings save immediately removes the Secure attribute from
+// all subsequent CSRF, session, and logout cookies without restarting.
+// Per security-model.md section 7: Secure cookie must not be set for plain http endpoints.
+func TestSecureCookieParity_HttpsToHttp(t *testing.T) {
+	handler, _ := setupTestUIServerForCookieReload(t, "https://example.com")
+
+	// --- Pre-save: cookies must have Secure=true ---
+	csrfRR := doCSRF(t, handler)
+	if c := findCSRFCookie(csrfRR); c == nil {
+		t.Fatal("pre-save: no CSRF cookie")
+	} else if !c.Secure {
+		t.Error("pre-save: CSRF cookie must have Secure=true for https endpoint")
+	}
+
+	loginRR := doLogin(t, handler, testAdminUsername, testAdminPassword)
+	if loginRR.Code != http.StatusOK {
+		t.Fatalf("pre-save login failed: %d", loginRR.Code)
+	}
+	if c := findSessionCookie(loginRR); c == nil {
+		t.Fatal("pre-save: no session cookie")
+	} else if !c.Secure {
+		t.Error("pre-save: session cookie must have Secure=true for https endpoint")
+	}
+
+	// --- Save: change publicEndpoint to http:// ---
+	loginCookies := loginRR.Result().Cookies()
+	csrfGetRR := doGetCSRF(t, handler, loginCookies)
+	if csrfGetRR.Code != http.StatusOK {
+		t.Fatalf("get CSRF failed: %d", csrfGetRR.Code)
+	}
+	var csrfResp map[string]string
+	if err := json.Unmarshal(csrfGetRR.Body.Bytes(), &csrfResp); err != nil {
+		t.Fatalf("parsing CSRF response: %v", err)
+	}
+	saveCookies := append(loginCookies, csrfGetRR.Result().Cookies()...)
+	saveRR := doSettingsSave(t, handler, saveCookies, csrfResp["token"], map[string]interface{}{
+		"server": map[string]interface{}{"publicEndpoint": "http://localhost:9000"},
+	})
+	if saveRR.Code != http.StatusOK {
+		t.Fatalf("save failed: %d: %s", saveRR.Code, saveRR.Body.String())
+	}
+
+	// --- Post-save: cookies must NOT have Secure flag ---
+
+	// CSRF cookie after reload.
+	csrfRR2 := doCSRF(t, handler)
+	if c := findCSRFCookie(csrfRR2); c == nil {
+		t.Fatal("post-save: no CSRF cookie")
+	} else if c.Secure {
+		t.Error("post-save: CSRF cookie must not have Secure flag after https→http reload")
+	}
+
+	// Session cookie after reload.
+	loginRR2 := doLogin(t, handler, testAdminUsername, testAdminPassword)
+	if loginRR2.Code != http.StatusOK {
+		t.Fatalf("post-save login failed: %d", loginRR2.Code)
+	}
+	if c := findSessionCookie(loginRR2); c == nil {
+		t.Fatal("post-save: no session cookie")
+	} else if c.Secure {
+		t.Error("post-save: session cookie must not have Secure flag after https→http reload")
+	}
+
+	// Logout clear cookies after reload.
+	logoutRR := doLogout(t, handler, loginRR2.Result().Cookies())
+	if logoutRR.Code != http.StatusNoContent {
+		t.Fatalf("post-save logout failed: %d", logoutRR.Code)
+	}
+	if c := findSessionCookie(logoutRR); c != nil && c.Secure {
+		t.Error("post-save: logout session clear cookie must not have Secure flag after https→http reload")
+	}
+	if c := findCSRFCookie(logoutRR); c != nil && c.Secure {
+		t.Error("post-save: logout CSRF clear cookie must not have Secure flag after https→http reload")
+	}
+}
+
+// TestSettingsSave_ConcurrentSave_FileParity verifies that after concurrent saves,
+// GET /ui/api/settings always reflects the same state as the config file.
+//
+// This is the primary regression test for the save transaction serialization bug:
+//   - Before fix: two concurrent saves could each read the original file, write
+//     different candidates, and then apply independent runtime reloads — leaving
+//     the file and runtime in divergent states.
+//   - After fix: saveMu serializes the entire transaction so that file content and
+//     runtime state always point to the same logical snapshot.
+//
+// The test uses a barrier channel to maximize goroutine overlap, then asserts the
+// parity invariant: for every field that appears in the config file, GET settings
+// must report the same value.
+//
+// Run with -race to also verify no Go data races.
+func TestSettingsSave_ConcurrentSave_FileParity(t *testing.T) {
+	cfg, configPath := setupWritableConfig(t)
+	handler, _ := setupTestUIServerForSave(t, cfg)
+
+	// Authenticate once; all goroutines share the same session + CSRF token.
+	loginRR := doLogin(t, handler, testAdminUsername, testAdminPassword)
+	if loginRR.Code != http.StatusOK {
+		t.Fatalf("login failed: %d", loginRR.Code)
+	}
+	cookies := loginRR.Result().Cookies()
+
+	csrfRR := doGetCSRF(t, handler, cookies)
+	if csrfRR.Code != http.StatusOK {
+		t.Fatalf("CSRF fetch failed: %d", csrfRR.Code)
+	}
+	var csrfResp map[string]string
+	if err := json.Unmarshal(csrfRR.Body.Bytes(), &csrfResp); err != nil {
+		t.Fatalf("parsing CSRF response: %v", err)
+	}
+	csrf := csrfResp["token"]
+	cookies = append(cookies, csrfRR.Result().Cookies()...)
+
+	// Two payloads that modify disjoint fields.
+	// With serialization: the second save reads the file already updated by the
+	// first save, so both fields end up in the file AND in runtime.
+	// Without serialization: both reads happen from the original file, so the
+	// last writer's file only has its own change — the other change is lost from
+	// the file while runtime may have a mixed state.
+	payloads := []map[string]interface{}{
+		{"logging": map[string]interface{}{"level": "warn"}},
+		{"s3": map[string]interface{}{"maxPresignTTL": "48h"}},
+	}
+
+	// Barrier: release all goroutines simultaneously to maximize overlap.
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(len(payloads))
+
+	for _, p := range payloads {
+		payload := p // capture
+		go func() {
+			defer wg.Done()
+			<-start // wait for barrier
+			doSettingsSave(t, handler, cookies, csrf, payload)
+		}()
+	}
+
+	close(start) // release all goroutines at once
+	wg.Wait()    // wait for all saves to complete
+
+	// --- Invariant check: GET /ui/api/settings must match the config file ---
+
+	// Read the config file on disk.
+	fileData, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("reading config file: %v", err)
+	}
+	var fileMap map[string]interface{}
+	if err := yaml.Unmarshal(fileData, &fileMap); err != nil {
+		t.Fatalf("parsing config file YAML: %v", err)
+	}
+
+	// GET the runtime settings.
+	getRR := doSettings(t, handler, cookies)
+	if getRR.Code != http.StatusOK {
+		t.Fatalf("GET settings failed: %d: %s", getRR.Code, getRR.Body.String())
+	}
+	var settingsResp map[string]interface{}
+	if err := json.Unmarshal(getRR.Body.Bytes(), &settingsResp); err != nil {
+		t.Fatalf("parsing GET settings response: %v", err)
+	}
+
+	// Check logging.level parity.
+	fileLogging, _ := fileMap["logging"].(map[string]interface{})
+	respLogging, _ := settingsResp["logging"].(map[string]interface{})
+	if fileLogging == nil || respLogging == nil {
+		t.Fatal("missing logging section in file or response")
+	}
+	if fileLogging["level"] != respLogging["level"] {
+		t.Errorf("parity violation: file logging.level=%v, runtime logging.level=%v",
+			fileLogging["level"], respLogging["level"])
+	}
+
+	// Check s3.max_presign_ttl parity.
+	// The file stores the raw duration string; the response serializes it via Duration.String().
+	// We parse both to compare as time.Duration values.
+	fileS3, _ := fileMap["s3"].(map[string]interface{})
+	respS3, _ := settingsResp["s3"].(map[string]interface{})
+	if fileS3 == nil || respS3 == nil {
+		t.Fatal("missing s3 section in file or response")
+	}
+	fileMaxPresignRaw, _ := fileS3["max_presign_ttl"].(string)
+	respMaxPresignStr, _ := respS3["maxPresignTTL"].(string)
+	if fileMaxPresignRaw == "" || respMaxPresignStr == "" {
+		t.Fatalf("missing max_presign_ttl: file=%q resp=%q", fileMaxPresignRaw, respMaxPresignStr)
+	}
+	fileDur, err := time.ParseDuration(fileMaxPresignRaw)
+	if err != nil {
+		t.Fatalf("parsing file max_presign_ttl %q: %v", fileMaxPresignRaw, err)
+	}
+	respDur, err := time.ParseDuration(respMaxPresignStr)
+	if err != nil {
+		t.Fatalf("parsing response maxPresignTTL %q: %v", respMaxPresignStr, err)
+	}
+	if fileDur != respDur {
+		t.Errorf("parity violation: file max_presign_ttl=%v, runtime maxPresignTTL=%v",
+			fileDur, respDur)
+	}
+}
+
+// TestSettingsSave_ConcurrentSave_SameField verifies that concurrent saves of the
+// same field do not leave file and runtime divergent.
+//
+// Only one value can "win"; the invariant is that file and runtime agree on which
+// value won — they must report the same value.
+func TestSettingsSave_ConcurrentSave_SameField(t *testing.T) {
+	cfg, configPath := setupWritableConfig(t)
+	handler, _ := setupTestUIServerForSave(t, cfg)
+
+	loginRR := doLogin(t, handler, testAdminUsername, testAdminPassword)
+	if loginRR.Code != http.StatusOK {
+		t.Fatalf("login failed: %d", loginRR.Code)
+	}
+	cookies := loginRR.Result().Cookies()
+
+	csrfRR := doGetCSRF(t, handler, cookies)
+	var csrfResp map[string]string
+	json.Unmarshal(csrfRR.Body.Bytes(), &csrfResp)
+	csrf := csrfResp["token"]
+	cookies = append(cookies, csrfRR.Result().Cookies()...)
+
+	// Four concurrent saves of the same field (logging.level) with different values.
+	// After all complete, file and runtime must agree on the winning value.
+	levels := []string{"warn", "debug", "error", "info"}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(len(levels))
+
+	for _, lvl := range levels {
+		level := lvl // capture
+		go func() {
+			defer wg.Done()
+			<-start
+			doSettingsSave(t, handler, cookies, csrf, map[string]interface{}{
+				"logging": map[string]interface{}{"level": level},
+			})
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	// Read file.
+	fileData, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("reading config file: %v", err)
+	}
+	var fileMap map[string]interface{}
+	if err := yaml.Unmarshal(fileData, &fileMap); err != nil {
+		t.Fatalf("parsing config file: %v", err)
+	}
+	fileLogging, _ := fileMap["logging"].(map[string]interface{})
+	if fileLogging == nil {
+		t.Fatal("missing logging section in file")
+	}
+	fileLevel, _ := fileLogging["level"].(string)
+
+	// GET runtime settings.
+	getRR := doSettings(t, handler, cookies)
+	if getRR.Code != http.StatusOK {
+		t.Fatalf("GET settings failed: %d", getRR.Code)
+	}
+	var settingsResp map[string]interface{}
+	json.Unmarshal(getRR.Body.Bytes(), &settingsResp)
+	respLogging, _ := settingsResp["logging"].(map[string]interface{})
+	if respLogging == nil {
+		t.Fatal("missing logging section in response")
+	}
+	respLevel, _ := respLogging["level"].(string)
+
+	// The exact winner is non-deterministic, but file and runtime must agree.
+	if fileLevel != respLevel {
+		t.Errorf("parity violation after concurrent same-field saves: file=%q, runtime=%q",
+			fileLevel, respLevel)
+	}
+
+	// The winning value must be one of the submitted values.
+	validLevels := map[string]bool{"warn": true, "debug": true, "error": true, "info": true}
+	if !validLevels[fileLevel] {
+		t.Errorf("unexpected logging.level in file after concurrent saves: %q", fileLevel)
+	}
 }

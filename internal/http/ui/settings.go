@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -405,6 +406,10 @@ type settingsSaveResponse struct {
 //   - 401: no session
 //   - 403: CSRF validation failed
 //   - 409: config file not writable
+//
+// Concurrency: the entire critical section (read cfg → build candidate → validate →
+// write file → runtime reload) is serialized by saveMu. This prevents concurrent
+// saves from producing divergent file/runtime state.
 func (s *Server) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.requireSession(w, r)
 	if !ok {
@@ -418,33 +423,43 @@ func (s *Server) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "settings not available")
 		return
 	}
-	cfg := s.settingsView.Cfg()
 
-	// Check config file is writable.
-	if err := config.CanSaveConfig(cfg); err != nil {
-		log.Printf("AUDIT settings_save_rejected user=%q reason=config_not_writable path=%q", sess.Username, cfg.ConfigFilePath)
-		writeJSONError(w, http.StatusConflict, "config file is not writable")
-		return
-	}
-
-	// Read body once for both validation and parsing.
+	// Read body before acquiring saveMu: body I/O must not hold the save lock.
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "failed to read request body")
 		return
 	}
 
-	// Reject any unsupported fields via strict check.
+	// Reject any unsupported fields via strict check (stateless, no shared state).
 	if err := checkUnsupportedFields(body); err != nil {
 		log.Printf("AUDIT settings_save_rejected user=%q reason=unsupported_field err=%q", sess.Username, err.Error())
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	// Parse payload.
+	// Parse payload (stateless, no shared state).
 	var payload SettingsSavePayload
 	if err := json.Unmarshal(body, &payload); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	// Serialize the save transaction: read cfg → build candidate → validate →
+	// write file → runtime reload must be atomic with respect to other saves.
+	// This prevents two concurrent saves from interleaving file writes and runtime
+	// state updates in a way that leaves file and runtime divergent.
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
+	// Read the current config snapshot inside the mutex to ensure consistency
+	// with the file we are about to patch.
+	cfg := s.settingsView.Cfg()
+
+	// Check config file is writable.
+	if err := config.CanSaveConfig(cfg); err != nil {
+		log.Printf("AUDIT settings_save_rejected user=%q reason=config_not_writable path=%q", sess.Username, cfg.ConfigFilePath)
+		writeJSONError(w, http.StatusConflict, "config file is not writable")
 		return
 	}
 
@@ -484,6 +499,12 @@ func (s *Server) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 	// are present before Validate runs.
 	config.MergeRuntimeEnvLocked(candidateCfg, cfg)
 
+	// Preserve runtime-only metadata that is not stored in the config file.
+	// ConfigFilePath and ConfigFileReadOnly must be carried into the hot-reloaded
+	// runtime state so that subsequent GET /ui/api/settings and save operations work.
+	candidateCfg.ConfigFilePath = cfg.ConfigFilePath
+	candidateCfg.ConfigFileReadOnly = cfg.ConfigFileReadOnly
+
 	// Validate the candidate config.
 	if err := config.Validate(candidateCfg); err != nil {
 		log.Printf("AUDIT settings_save_rejected user=%q reason=validation_failed err=%q", sess.Username, err.Error())
@@ -500,9 +521,12 @@ func (s *Server) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("AUDIT settings_save_success user=%q path=%q", sess.Username, cfg.ConfigFilePath)
 
-	// Apply the safe subset to the runtime in-memory state immediately.
+	// Apply the candidate config to the runtime in-memory state immediately.
 	// Per configuration-model.md section 8.3: safe subset is "즉시 반영 가능".
-	s.applyRuntimeReload(&payload)
+	//
+	// Using candidateCfg (already validated and persisted) ensures that:
+	//   - validation target == persisted file content == in-memory runtime state
+	s.applyRuntimeReloadConfig(candidateCfg)
 
 	resp := settingsSaveResponse{
 		Saved:           true,
@@ -570,43 +594,6 @@ func (s *Server) checkEnvLocked(cfg *config.Config, payload *SettingsSavePayload
 	return nil
 }
 
-// applyPayload applies the payload changes to a copy of the config.
-func (s *Server) applyPayload(cfg *config.Config, payload *SettingsSavePayload) *config.Config {
-	// Create a shallow copy of the config.
-	updated := *cfg
-
-	if payload.Server != nil && payload.Server.PublicEndpoint != nil {
-		updated.Server.PublicEndpoint = *payload.Server.PublicEndpoint
-	}
-	if payload.S3 != nil && payload.S3.MaxPresignTTL != nil {
-		if d, err := time.ParseDuration(*payload.S3.MaxPresignTTL); err == nil {
-			updated.S3.MaxPresignTTL = config.Duration{Duration: d}
-		}
-	}
-	if payload.Logging != nil {
-		if payload.Logging.Level != nil {
-			updated.Logging.Level = *payload.Logging.Level
-		}
-		if payload.Logging.AccessLog != nil {
-			updated.Logging.AccessLog = *payload.Logging.AccessLog
-		}
-	}
-	if payload.UI != nil {
-		if payload.UI.SessionTTL != nil {
-			if d, err := time.ParseDuration(*payload.UI.SessionTTL); err == nil {
-				updated.UI.SessionTTL = config.Duration{Duration: d}
-			}
-		}
-		if payload.UI.SessionIdleTTL != nil {
-			if d, err := time.ParseDuration(*payload.UI.SessionIdleTTL); err == nil {
-				updated.UI.SessionIdleTTL = config.Duration{Duration: d}
-			}
-		}
-	}
-
-	return &updated
-}
-
 // computeRequiresRestart returns true only if the payload contains a field that
 // requires a server restart to take effect.
 // All fields in SettingsSavePayload belong to the safe subset that supports
@@ -617,50 +604,50 @@ func computeRequiresRestart(payload *SettingsSavePayload) bool {
 	return false
 }
 
-// applyRuntimeReload applies the safe subset from payload to the runtime in-memory state.
-// Called after a successful config file write. Thread-safe.
+// applyRuntimeReloadConfig applies the validated candidate config to the runtime
+// in-memory state. Must be called with saveMu held.
+//
+// Unlike the former applyRuntimeReload (which rebuilt config from currentCfg + payload
+// using applyPayload — silently ignoring parse errors), this uses candidateCfg directly.
+// That ensures validation target, persisted file content, and in-memory runtime state
+// are all the same logical snapshot.
+//
+// candidateCfg must have ConfigFilePath and ConfigFileReadOnly set before calling
+// (they are runtime-only metadata not present in the config file).
 //
 // Session TTL policy:
 //   - New sessions created after this call use the new TTL values.
 //   - Existing sessions retain the TTL captured at their creation time (see Session.TTL).
 //
-// Rationale: conservative approach for a single-admin tool. Retroactive session
-// shortening (security tightening) is deferred to keep active admin sessions
-// stable during settings changes. Retroactive extension is unnecessary.
 // Per configuration-model.md section 8.3.
-func (s *Server) applyRuntimeReload(payload *SettingsSavePayload) {
+func (s *Server) applyRuntimeReloadConfig(candidateCfg *config.Config) {
 	if s.settingsView == nil {
 		return
 	}
 
-	// Build an updated copy of the current runtime config.
-	// applyPayload copies all fields and updates only the payload fields,
-	// preserving ConfigFilePath, EnvLocked, and other non-payload metadata.
-	currentCfg := s.settingsView.Cfg()
-	updated := s.applyPayload(currentCfg, payload)
-
-	// Atomically publish the updated config for GET /ui/api/settings.
-	s.settingsView.UpdateCfg(updated)
+	// Atomically publish the candidate config for GET /ui/api/settings.
+	s.settingsView.UpdateCfg(candidateCfg)
 
 	// Update Server's presign hot-reload fields under write lock.
+	// secureCookie is also included: public_endpoint scheme determines the Secure
+	// cookie policy per security-model.md section 7.
 	s.reloadMu.Lock()
-	s.publicEndpoint = updated.Server.PublicEndpoint
-	s.maxPresignTTL = updated.S3.MaxPresignTTL.Duration
+	s.publicEndpoint = candidateCfg.Server.PublicEndpoint
+	s.maxPresignTTL = candidateCfg.S3.MaxPresignTTL.Duration
+	s.secureCookie = strings.HasPrefix(candidateCfg.Server.PublicEndpoint, "https://")
 	s.reloadMu.Unlock()
 
 	// Update session store TTLs for newly created sessions.
-	// Only update if UI TTL fields were present in the payload.
-	if payload.UI != nil && (payload.UI.SessionTTL != nil || payload.UI.SessionIdleTTL != nil) {
-		s.store.UpdateTTLs(updated.UI.SessionTTL.Duration, updated.UI.SessionIdleTTL.Duration)
-	}
+	// candidateCfg always has valid (non-zero) UI TTL values after Validate.
+	s.store.UpdateTTLs(candidateCfg.UI.SessionTTL.Duration, candidateCfg.UI.SessionIdleTTL.Duration)
 
 	log.Printf("INFO settings_hot_reload publicEndpoint=%q maxPresignTTL=%s loggingLevel=%q loggingAccessLog=%v sessionTTL=%s sessionIdleTTL=%s",
-		updated.Server.PublicEndpoint,
-		updated.S3.MaxPresignTTL,
-		updated.Logging.Level,
-		updated.Logging.AccessLog,
-		updated.UI.SessionTTL,
-		updated.UI.SessionIdleTTL,
+		candidateCfg.Server.PublicEndpoint,
+		candidateCfg.S3.MaxPresignTTL,
+		candidateCfg.Logging.Level,
+		candidateCfg.Logging.AccessLog,
+		candidateCfg.UI.SessionTTL,
+		candidateCfg.UI.SessionIdleTTL,
 	)
 }
 
