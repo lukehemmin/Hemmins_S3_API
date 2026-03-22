@@ -30,17 +30,17 @@ const sessionCookieName = "hemmins_session"
 type Server struct {
 	db           *metadata.DB
 	store        *SessionStore
-	secureCookie bool // true when server.public_endpoint starts with "https://"
 	settingsView *SettingsView
+
+	// defaultSecureCookie is the initial secure-cookie policy passed to NewServer.
+	// Used only when settingsView is nil (before SetConfig is called).
+	// After SetConfig, getSecureCookie() derives the value from settingsView.Cfg().
+	defaultSecureCookie bool
 
 	// saveMu serializes the entire settings save transaction (read cfg → build candidate →
 	// validate → write file → runtime reload). This prevents concurrent saves from
 	// producing divergent file/runtime state.
 	saveMu sync.Mutex
-
-	// reloadMu protects publicEndpoint, maxPresignTTL, and secureCookie during hot-reload.
-	// region and masterKey are never hot-reloaded (require restart).
-	reloadMu sync.RWMutex
 
 	// Storage paths for object upload API.
 	// Set by SetConfig from the runtime configuration.
@@ -49,21 +49,20 @@ type Server struct {
 
 	// Presign configuration for presigned URL generation.
 	// Set by SetConfig from the runtime configuration.
-	// publicEndpoint and maxPresignTTL are hot-reloadable; use getters for concurrent access.
-	publicEndpoint string
-	region         string
-	masterKey      string
-	maxPresignTTL  time.Duration
+	// publicEndpoint and maxPresignTTL are hot-reloadable via settingsView; use getters.
+	region    string
+	masterKey string
 }
 
 // NewServer creates a UI Server backed by db using store for session management.
-// secureCookie must be true when cfg.Server.PublicEndpoint has an https:// prefix.
+// secureCookie is used as the initial secure-cookie policy before SetConfig is called.
+// After SetConfig, the policy is derived from cfg.Server.PublicEndpoint automatically.
 // Per security-model.md sections 6 and 7: Secure cookie is required for HTTPS public endpoints.
 func NewServer(db *metadata.DB, store *SessionStore, secureCookie bool) *Server {
 	return &Server{
-		db:           db,
-		store:        store,
-		secureCookie: secureCookie,
+		db:                  db,
+		store:               store,
+		defaultSecureCookie: secureCookie,
 	}
 }
 
@@ -75,39 +74,39 @@ func (s *Server) SetConfig(cfg *config.Config) {
 	s.settingsView = NewSettingsView(cfg)
 	s.objectRoot = cfg.Paths.ObjectRoot
 	s.tempRoot = cfg.Paths.TempRoot
-	s.reloadMu.Lock()
-	s.publicEndpoint = cfg.Server.PublicEndpoint
-	s.maxPresignTTL = cfg.S3.MaxPresignTTL.Duration
-	s.reloadMu.Unlock()
 	s.region = cfg.S3.Region
 	s.masterKey = cfg.Auth.MasterKey
 }
 
 // getPublicEndpoint returns the current public endpoint, safe for concurrent use.
-// publicEndpoint may be updated by applyRuntimeReload during hot-reload.
+// Derived from settingsView.Cfg() so that settingsView.UpdateCfg() is the
+// single atomic publish point for all hot-reload fields.
 func (s *Server) getPublicEndpoint() string {
-	s.reloadMu.RLock()
-	v := s.publicEndpoint
-	s.reloadMu.RUnlock()
-	return v
+	if s.settingsView == nil {
+		return ""
+	}
+	return s.settingsView.Cfg().Server.PublicEndpoint
 }
 
 // getMaxPresignTTL returns the current max presign TTL, safe for concurrent use.
-// maxPresignTTL may be updated by applyRuntimeReload during hot-reload.
+// Derived from settingsView.Cfg() so that settingsView.UpdateCfg() is the
+// single atomic publish point for all hot-reload fields.
 func (s *Server) getMaxPresignTTL() time.Duration {
-	s.reloadMu.RLock()
-	v := s.maxPresignTTL
-	s.reloadMu.RUnlock()
-	return v
+	if s.settingsView == nil {
+		return 0
+	}
+	return s.settingsView.Cfg().S3.MaxPresignTTL.Duration
 }
 
 // getSecureCookie returns the current secure-cookie policy, safe for concurrent use.
-// secureCookie may be updated by applyRuntimeReload when server.public_endpoint changes.
+// Derived from settingsView.Cfg() so that settingsView.UpdateCfg() is the
+// single atomic publish point for all hot-reload fields.
+// Falls back to defaultSecureCookie when settingsView is not yet initialized.
 func (s *Server) getSecureCookie() bool {
-	s.reloadMu.RLock()
-	v := s.secureCookie
-	s.reloadMu.RUnlock()
-	return v
+	if s.settingsView == nil {
+		return s.defaultSecureCookie
+	}
+	return strings.HasPrefix(s.settingsView.Cfg().Server.PublicEndpoint, "https://")
 }
 
 // Handler returns the http.Handler serving all UI session API routes.

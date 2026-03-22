@@ -61,13 +61,17 @@ func setupTestUIServer(t *testing.T, secureCookie bool) (http.Handler, *metadata
 	}
 
 	// Create config with storage paths and presign settings.
+	publicEndpoint := testPublicEndpoint
+	if secureCookie {
+		publicEndpoint = "https://localhost:9443"
+	}
 	cfg := &config.Config{
 		Paths: config.PathsConfig{
 			ObjectRoot: objectRoot,
 			TempRoot:   tempRoot,
 		},
 		Server: config.ServerConfig{
-			PublicEndpoint: testPublicEndpoint,
+			PublicEndpoint: publicEndpoint,
 		},
 		S3: config.S3Config{
 			Region:        testRegion,

@@ -2042,3 +2042,118 @@ func TestSettingsSave_ConcurrentSave_SameField(t *testing.T) {
 		t.Errorf("unexpected logging.level in file after concurrent saves: %q", fileLevel)
 	}
 }
+
+// TestSettingsSave_SnapshotConsistency verifies that after a save, all hot-reload
+// readers derive their values from the same atomic config snapshot.
+//
+// Specifically: GET /ui/api/settings and the CSRF cookie Secure flag must always
+// reflect the same config version. Prior to the fix, applyRuntimeReloadConfig()
+// published in two steps (settingsView.UpdateCfg then reloadMu block), allowing
+// a concurrent reader to see the new publicEndpoint from settingsView but the old
+// secureCookie from the reloadMu-protected field — a mixed/inconsistent state.
+//
+// After the fix, settingsView.UpdateCfg() is the single atomic publish point:
+// getPublicEndpoint(), getMaxPresignTTL(), and getSecureCookie() all derive their
+// values from settingsView.Cfg(), so all readers see the same snapshot.
+func TestSettingsSave_SnapshotConsistency(t *testing.T) {
+	// Start with http:// endpoint (secureCookie=false initially).
+	cfg, _ := setupWritableConfig(t)
+	// cfg.Server.PublicEndpoint is "http://localhost:9000" (from setupWritableConfig)
+	handler, _ := setupTestUIServerForSave(t, cfg)
+
+	loginRR := doLogin(t, handler, testAdminUsername, testAdminPassword)
+	if loginRR.Code != http.StatusOK {
+		t.Fatalf("login failed: %d", loginRR.Code)
+	}
+	cookies := loginRR.Result().Cookies()
+
+	csrfRR := doGetCSRF(t, handler, cookies)
+	if csrfRR.Code != http.StatusOK {
+		t.Fatalf("csrf failed: %d", csrfRR.Code)
+	}
+	var csrfResp map[string]string
+	json.Unmarshal(csrfRR.Body.Bytes(), &csrfResp)
+	csrf := csrfResp["token"]
+	cookies = append(cookies, csrfRR.Result().Cookies()...)
+
+	// Pre-save: verify http endpoint and non-secure CSRF cookie.
+	preSaveGetRR := doSettings(t, handler, cookies)
+	if preSaveGetRR.Code != http.StatusOK {
+		t.Fatalf("pre-save GET failed: %d", preSaveGetRR.Code)
+	}
+	var preSaveResp map[string]interface{}
+	json.Unmarshal(preSaveGetRR.Body.Bytes(), &preSaveResp)
+	preServer, _ := preSaveResp["server"].(map[string]interface{})
+	if preServer["publicEndpoint"] != "http://localhost:9000" {
+		t.Fatalf("pre-save publicEndpoint: got %v, want http://localhost:9000", preServer["publicEndpoint"])
+	}
+
+	preSaveCSRFRR := doGetCSRF(t, handler, cookies)
+	var preSaveCSRFCookie *http.Cookie
+	for _, c := range preSaveCSRFRR.Result().Cookies() {
+		if c.Name == "hemmins_csrf" {
+			preSaveCSRFCookie = c
+		}
+	}
+	if preSaveCSRFCookie == nil {
+		t.Fatal("no pre-save CSRF cookie")
+	}
+	if preSaveCSRFCookie.Secure {
+		t.Error("pre-save CSRF cookie should not have Secure flag for http:// endpoint")
+	}
+
+	// Save: change publicEndpoint to https://.
+	saveRR := doSettingsSave(t, handler, cookies, csrf, map[string]interface{}{
+		"server": map[string]interface{}{"publicEndpoint": "https://localhost:9443"},
+	})
+	if saveRR.Code != http.StatusOK {
+		t.Fatalf("save failed: %d: %s", saveRR.Code, saveRR.Body.String())
+	}
+
+	// Post-save snapshot consistency check:
+	// Both GET /ui/api/settings and the CSRF cookie Secure flag must reflect
+	// the same config version — they must agree on the current publicEndpoint.
+
+	// Read the runtime settings.
+	postSaveGetRR := doSettings(t, handler, cookies)
+	if postSaveGetRR.Code != http.StatusOK {
+		t.Fatalf("post-save GET failed: %d", postSaveGetRR.Code)
+	}
+	var postSaveResp map[string]interface{}
+	if err := json.Unmarshal(postSaveGetRR.Body.Bytes(), &postSaveResp); err != nil {
+		t.Fatalf("parsing post-save GET response: %v", err)
+	}
+	postServer, _ := postSaveResp["server"].(map[string]interface{})
+	if postServer == nil {
+		t.Fatal("missing server object in post-save response")
+	}
+	runtimeEndpoint, _ := postServer["publicEndpoint"].(string)
+
+	// Read a fresh CSRF cookie — its Secure flag is set by getSecureCookie().
+	postSaveCSRFRR := doGetCSRF(t, handler, cookies)
+	var postSaveCSRFCookie *http.Cookie
+	for _, c := range postSaveCSRFRR.Result().Cookies() {
+		if c.Name == "hemmins_csrf" {
+			postSaveCSRFCookie = c
+		}
+	}
+	if postSaveCSRFCookie == nil {
+		t.Fatal("no post-save CSRF cookie")
+	}
+
+	// Core invariant: settings and cookie must reflect the same snapshot.
+	endpointIsHTTPS := strings.HasPrefix(runtimeEndpoint, "https://")
+	if endpointIsHTTPS != postSaveCSRFCookie.Secure {
+		t.Errorf("snapshot inconsistency: settings.publicEndpoint=%q (https=%v) but CSRF cookie.Secure=%v; "+
+			"readers derived values from different config versions (split-publish bug)",
+			runtimeEndpoint, endpointIsHTTPS, postSaveCSRFCookie.Secure)
+	}
+
+	// Also verify the save actually took effect with the expected new values.
+	if runtimeEndpoint != "https://localhost:9443" {
+		t.Errorf("settings.publicEndpoint after save: got %q, want https://localhost:9443", runtimeEndpoint)
+	}
+	if !postSaveCSRFCookie.Secure {
+		t.Error("CSRF cookie should have Secure flag after saving https:// endpoint")
+	}
+}

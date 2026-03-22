@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -625,17 +624,11 @@ func (s *Server) applyRuntimeReloadConfig(candidateCfg *config.Config) {
 		return
 	}
 
-	// Atomically publish the candidate config for GET /ui/api/settings.
+	// Atomically publish the candidate config as a single snapshot.
+	// All readers (GET /ui/api/settings, presign handler, login/logout/CSRF cookie
+	// issuance) derive their hot-reload values from settingsView.Cfg(), so this one
+	// Store call is the single publish point — no reader can see a mixed state.
 	s.settingsView.UpdateCfg(candidateCfg)
-
-	// Update Server's presign hot-reload fields under write lock.
-	// secureCookie is also included: public_endpoint scheme determines the Secure
-	// cookie policy per security-model.md section 7.
-	s.reloadMu.Lock()
-	s.publicEndpoint = candidateCfg.Server.PublicEndpoint
-	s.maxPresignTTL = candidateCfg.S3.MaxPresignTTL.Duration
-	s.secureCookie = strings.HasPrefix(candidateCfg.Server.PublicEndpoint, "https://")
-	s.reloadMu.Unlock()
 
 	// Update session store TTLs for newly created sessions.
 	// candidateCfg always has valid (non-zero) UI TTL values after Validate.
