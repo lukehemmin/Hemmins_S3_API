@@ -238,6 +238,34 @@
                 <span class="meta-label">사용자 메타데이터</span>
                 <div id="meta-user-metadata-content" class="meta-user-content"></div>
               </div>
+              
+              <!-- Presigned URL Section -->
+              <div class="presign-section">
+                <h4 class="presign-title">Presigned URL 발급</h4>
+                <div class="presign-form">
+                  <div class="presign-form-row">
+                    <label for="presign-method">Method</label>
+                    <select id="presign-method" class="presign-select">
+                      <option value="GET">GET (다운로드)</option>
+                      <option value="PUT">PUT (업로드)</option>
+                    </select>
+                  </div>
+                  <div class="presign-form-row">
+                    <label for="presign-expires">유효 기간 (초)</label>
+                    <input type="number" id="presign-expires" value="3600" min="60" max="604800" class="presign-input">
+                  </div>
+                  <button type="button" id="presign-generate-btn" class="btn-primary btn-small">URL 발급</button>
+                </div>
+                <div id="presign-error" class="error presign-error" style="display: none;"></div>
+                <div id="presign-result" class="presign-result" style="display: none;">
+                  <label class="meta-label">생성된 URL</label>
+                  <div class="presign-url-container">
+                    <code id="presign-url" class="presign-url"></code>
+                    <button type="button" id="presign-copy-btn" class="btn-copy btn-small">복사</button>
+                  </div>
+                  <p class="presign-hint">이 URL은 <span id="presign-expires-display"></span>초 동안 유효합니다.</p>
+                </div>
+              </div>
             </div>
           </div>
         </section>
@@ -348,7 +376,7 @@
               </div>
               <div class="settings-row">
                 <span class="settings-label">Public Endpoint</span>
-                <span id="settings-server-public-endpoint" class="settings-value mono">-</span>
+                <input type="text" id="settings-server-public-endpoint" class="settings-input mono" placeholder="http://localhost:9000">
                 <span id="settings-lock-server-public-endpoint" class="env-lock-badge" style="display: none;">ENV</span>
               </div>
               <div class="settings-row">
@@ -378,7 +406,7 @@
               </div>
               <div class="settings-row">
                 <span class="settings-label">Max Presign TTL</span>
-                <span id="settings-s3-presign-ttl" class="settings-value mono">-</span>
+                <input type="text" id="settings-s3-presign-ttl" class="settings-input mono" placeholder="24h">
                 <span id="settings-lock-s3-presign-ttl" class="env-lock-badge" style="display: none;">ENV</span>
               </div>
             </div>
@@ -388,12 +416,12 @@
               <h3>🎨 UI</h3>
               <div class="settings-row">
                 <span class="settings-label">세션 TTL</span>
-                <span id="settings-ui-session-ttl" class="settings-value mono">-</span>
+                <input type="text" id="settings-ui-session-ttl" class="settings-input mono" placeholder="12h">
                 <span id="settings-lock-ui-session-ttl" class="env-lock-badge" style="display: none;">ENV</span>
               </div>
               <div class="settings-row">
                 <span class="settings-label">유휴 세션 TTL</span>
-                <span id="settings-ui-idle-ttl" class="settings-value mono">-</span>
+                <input type="text" id="settings-ui-idle-ttl" class="settings-input mono" placeholder="30m">
                 <span id="settings-lock-ui-idle-ttl" class="env-lock-badge" style="display: none;">ENV</span>
               </div>
             </div>
@@ -403,12 +431,20 @@
               <h3>📝 로깅</h3>
               <div class="settings-row">
                 <span class="settings-label">로그 레벨</span>
-                <span id="settings-logging-level" class="settings-value mono">-</span>
+                <select id="settings-logging-level" class="settings-input">
+                  <option value="debug">debug</option>
+                  <option value="info">info</option>
+                  <option value="warn">warn</option>
+                  <option value="error">error</option>
+                </select>
                 <span id="settings-lock-logging-level" class="env-lock-badge" style="display: none;">ENV</span>
               </div>
               <div class="settings-row">
                 <span class="settings-label">접근 로그</span>
-                <span id="settings-logging-access" class="settings-value">-</span>
+                <label class="settings-checkbox-label">
+                  <input type="checkbox" id="settings-logging-access" class="settings-checkbox">
+                  <span class="settings-checkbox-text">활성화</span>
+                </label>
                 <span id="settings-lock-logging-access" class="env-lock-badge" style="display: none;">ENV</span>
               </div>
             </div>
@@ -451,9 +487,17 @@
               </table>
             </div>
             
-            <!-- Read-only Notice -->
-            <div class="settings-notice">
-              <p class="hint">💡 설정 변경은 현재 읽기 전용입니다. 설정 변경은 config.yaml 또는 환경변수를 통해 수행하세요.</p>
+            <!-- Settings Save Section -->
+            <div id="settings-save-section" class="settings-card settings-save-card">
+              <div id="settings-readonly-notice" class="settings-readonly-info" style="display: none;">
+                <p class="hint">💡 설정 파일이 읽기 전용이거나 존재하지 않아 설정을 변경할 수 없습니다. config.yaml 또는 환경변수를 통해 수행하세요.</p>
+              </div>
+              <div id="settings-save-error" class="error" style="display: none;"></div>
+              <div id="settings-save-success" class="success" style="display: none;"></div>
+              <div id="settings-restart-notice" class="settings-restart-notice" style="display: none;">
+                ⚠️ 설정이 저장되었습니다. 변경사항을 적용하려면 서버를 재시작하세요.
+              </div>
+              <button type="button" id="settings-save-btn" class="btn-primary">설정 저장</button>
             </div>
             
             <!-- Password Change -->

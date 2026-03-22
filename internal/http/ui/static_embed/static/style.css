@@ -1091,3 +1091,215 @@ button:disabled {
     display: none;
   }
 }
+
+/* Settings Editable Inputs */
+.settings-input {
+  flex: 1;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font-size: 0.9rem;
+  background: var(--color-bg);
+  color: var(--color-text);
+  max-width: 320px;
+}
+
+.settings-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.2);
+}
+
+.settings-input:disabled {
+  background: var(--color-border);
+  color: var(--color-text-light);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.settings-input.mono {
+  font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+}
+
+select.settings-input {
+  max-width: 200px;
+}
+
+.settings-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 1;
+  cursor: pointer;
+}
+
+.settings-checkbox {
+  width: 1rem;
+  height: 1rem;
+  cursor: pointer;
+}
+
+.settings-checkbox:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.settings-checkbox-text {
+  font-size: 0.9rem;
+  color: var(--color-text);
+}
+
+/* Settings Save Section */
+.settings-save-card {
+  border-top: 2px solid var(--color-primary);
+}
+
+.settings-save-card .btn-primary {
+  margin-top: 0.5rem;
+}
+
+.settings-save-card .btn-primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.settings-restart-notice {
+  background: rgba(243, 156, 18, 0.12);
+  color: #e67e22;
+  padding: 0.75rem 1rem;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  margin-bottom: 0.75rem;
+}
+
+.settings-readonly-info {
+  background: var(--color-bg);
+  padding: 0.75rem 1rem;
+  border-radius: 4px;
+  margin-bottom: 0.75rem;
+}
+
+.settings-readonly-info .hint {
+  margin: 0;
+}
+
+/* Presigned URL Section */
+.presign-section {
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--color-border);
+}
+
+.presign-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+  color: var(--color-text);
+}
+
+.presign-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.presign-form-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.presign-form-row label {
+  font-size: 0.85rem;
+  color: var(--color-text-light);
+  min-width: 100px;
+}
+
+.presign-select,
+.presign-input {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font-size: 0.9rem;
+  background: white;
+}
+
+.presign-select:focus,
+.presign-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+}
+
+.presign-form button {
+  margin-top: 0.5rem;
+  width: auto;
+  align-self: flex-start;
+}
+
+.presign-error {
+  margin-top: 0.75rem;
+  margin-bottom: 0;
+}
+
+.presign-result {
+  margin-top: 1rem;
+  padding: 1rem;
+  background: var(--color-bg);
+  border-radius: var(--radius);
+}
+
+.presign-url-container {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.presign-url {
+  flex: 1;
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 0.5rem 0.75rem;
+  font-size: 0.8rem;
+  word-break: break-all;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.presign-url-container .btn-copy {
+  flex-shrink: 0;
+}
+
+.presign-hint {
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--color-text-light);
+}
+
+/* Responsive adjustments for presign section */
+@media (max-width: 768px) {
+  .presign-form-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.25rem;
+  }
+  
+  .presign-form-row label {
+    min-width: auto;
+  }
+  
+  .presign-form button {
+    width: 100%;
+  }
+  
+  .presign-url-container {
+    flex-direction: column;
+  }
+  
+  .presign-url-container .btn-copy {
+    width: 100%;
+  }
+}

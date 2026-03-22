@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,6 +33,10 @@ type Server struct {
 	secureCookie bool // true when server.public_endpoint starts with "https://"
 	settingsView *SettingsView
 
+	// reloadMu protects publicEndpoint and maxPresignTTL during hot-reload.
+	// region and masterKey are never hot-reloaded (require restart).
+	reloadMu sync.RWMutex
+
 	// Storage paths for object upload API.
 	// Set by SetConfig from the runtime configuration.
 	objectRoot string
@@ -39,6 +44,7 @@ type Server struct {
 
 	// Presign configuration for presigned URL generation.
 	// Set by SetConfig from the runtime configuration.
+	// publicEndpoint and maxPresignTTL are hot-reloadable; use getters for concurrent access.
 	publicEndpoint string
 	region         string
 	masterKey      string
@@ -64,10 +70,30 @@ func (s *Server) SetConfig(cfg *config.Config) {
 	s.settingsView = NewSettingsView(cfg)
 	s.objectRoot = cfg.Paths.ObjectRoot
 	s.tempRoot = cfg.Paths.TempRoot
+	s.reloadMu.Lock()
 	s.publicEndpoint = cfg.Server.PublicEndpoint
+	s.maxPresignTTL = cfg.S3.MaxPresignTTL.Duration
+	s.reloadMu.Unlock()
 	s.region = cfg.S3.Region
 	s.masterKey = cfg.Auth.MasterKey
-	s.maxPresignTTL = cfg.S3.MaxPresignTTL.Duration
+}
+
+// getPublicEndpoint returns the current public endpoint, safe for concurrent use.
+// publicEndpoint may be updated by applyRuntimeReload during hot-reload.
+func (s *Server) getPublicEndpoint() string {
+	s.reloadMu.RLock()
+	v := s.publicEndpoint
+	s.reloadMu.RUnlock()
+	return v
+}
+
+// getMaxPresignTTL returns the current max presign TTL, safe for concurrent use.
+// maxPresignTTL may be updated by applyRuntimeReload during hot-reload.
+func (s *Server) getMaxPresignTTL() time.Duration {
+	s.reloadMu.RLock()
+	v := s.maxPresignTTL
+	s.reloadMu.RUnlock()
+	return v
 }
 
 // Handler returns the http.Handler serving all UI session API routes.
@@ -1339,8 +1365,11 @@ func (s *Server) handleObjectPresign(w http.ResponseWriter, r *http.Request, buc
 		return
 	}
 
+	// Load hot-reload fields once under read lock for consistent use in this request.
+	publicEndpoint := s.getPublicEndpoint()
+	maxTTL := s.getMaxPresignTTL()
+
 	// Check against max TTL.
-	maxTTL := s.maxPresignTTL
 	if maxTTL == 0 {
 		maxTTL = 7 * 24 * time.Hour // AWS default: 7 days
 	}
@@ -1350,7 +1379,7 @@ func (s *Server) handleObjectPresign(w http.ResponseWriter, r *http.Request, buc
 	}
 
 	// Check that presign configuration is available.
-	if s.publicEndpoint == "" {
+	if publicEndpoint == "" {
 		log.Printf("ERROR handleObjectPresign: public_endpoint not configured")
 		writeJSONError(w, http.StatusInternalServerError, "presign not available")
 		return
@@ -1381,7 +1410,7 @@ func (s *Server) handleObjectPresign(w http.ResponseWriter, r *http.Request, buc
 		Service:        "s3",
 		AccessKeyID:    accessKey,
 		SecretKey:      secretKey,
-		PublicEndpoint: s.publicEndpoint,
+		PublicEndpoint: publicEndpoint,
 		MaxTTL:         maxTTL,
 	}
 

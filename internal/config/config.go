@@ -132,3 +132,9 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 func (d Duration) String() string {
 	return d.Duration.String()
 }
+
+// MarshalYAML implements yaml.Marshaler for Duration.
+// Outputs a human-readable duration string (e.g., "12h0m0s").
+func (d Duration) MarshalYAML() (interface{}, error) {
+	return d.Duration.String(), nil
+}

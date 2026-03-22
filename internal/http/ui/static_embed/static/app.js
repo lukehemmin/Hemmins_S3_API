@@ -89,6 +89,11 @@
     settingsError: document.getElementById('settings-error'),
     settingsContent: document.getElementById('settings-content'),
     settingsPathsTbody: document.getElementById('settings-paths-tbody'),
+    settingsSaveBtn: document.getElementById('settings-save-btn'),
+    settingsSaveError: document.getElementById('settings-save-error'),
+    settingsSaveSuccess: document.getElementById('settings-save-success'),
+    settingsRestartNotice: document.getElementById('settings-restart-notice'),
+    settingsReadonlyNotice: document.getElementById('settings-readonly-notice'),
     
     // Password Change
     passwordChangeForm: document.getElementById('password-change-form'),
@@ -111,7 +116,10 @@
 
   let currentUser = null;
   let csrfToken = null;
-  
+  let settingsCanSave = false;
+  let settingsBaseline = null;
+  let settingsListenersAttached = false;
+
   // Object browser state
   let objectsState = {
     bucket: '',
@@ -762,6 +770,108 @@
 
   function closeObjectMeta() {
     app.objectMetaPanel.style.display = 'none';
+    // Reset presign UI state when closing
+    hidePresignResult();
+    hidePresignError();
+  }
+
+  // Presigned URL generation
+  function hidePresignError() {
+    const el = document.getElementById('presign-error');
+    if (el) el.style.display = 'none';
+  }
+
+  function showPresignError(message) {
+    const el = document.getElementById('presign-error');
+    if (el) {
+      el.textContent = message;
+      el.style.display = 'block';
+    }
+  }
+
+  function hidePresignResult() {
+    const el = document.getElementById('presign-result');
+    if (el) el.style.display = 'none';
+  }
+
+  function showPresignResult(url, expiresSeconds) {
+    const resultEl = document.getElementById('presign-result');
+    const urlEl = document.getElementById('presign-url');
+    const expiresEl = document.getElementById('presign-expires-display');
+    if (resultEl && urlEl && expiresEl) {
+      urlEl.textContent = url;
+      expiresEl.textContent = expiresSeconds;
+      resultEl.style.display = 'block';
+    }
+  }
+
+  async function generatePresignedURL(bucket, key, method, expiresSeconds) {
+    hidePresignError();
+    hidePresignResult();
+    
+    const btn = document.getElementById('presign-generate-btn');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '발급 중...';
+    }
+    
+    try {
+      // Fetch CSRF token first
+      if (!csrfToken) {
+        await fetchCSRF();
+      }
+      
+      const url = `/ui/api/buckets/${encodeURIComponent(bucket)}/objects/presign`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrfToken
+        },
+        body: JSON.stringify({
+          key: key,
+          method: method,
+          expiresSeconds: parseInt(expiresSeconds, 10)
+        })
+      });
+      
+      if (res.ok) {
+        const data = await res.json();
+        showPresignResult(data.url, data.expiresSeconds);
+      } else if (res.status === 401) {
+        showScreen('login');
+      } else {
+        const data = await res.json();
+        showPresignError(data.error || 'URL 발급에 실패했습니다.');
+      }
+    } catch (e) {
+      console.error('Failed to generate presigned URL:', e);
+      showPresignError('서버 연결 오류가 발생했습니다.');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'URL 발급';
+      }
+    }
+  }
+
+  function copyPresignedURL() {
+    const urlEl = document.getElementById('presign-url');
+    if (urlEl && urlEl.textContent) {
+      navigator.clipboard.writeText(urlEl.textContent)
+        .then(() => {
+          const btn = document.getElementById('presign-copy-btn');
+          if (btn) {
+            const originalText = btn.textContent;
+            btn.textContent = '복사됨!';
+            setTimeout(() => { btn.textContent = originalText; }, 1500);
+          }
+        })
+        .catch(err => {
+          console.error('Failed to copy:', err);
+          showPresignError('URL 복사에 실패했습니다.');
+        });
+    }
   }
 
   function downloadObject(bucket, key) {
@@ -869,6 +979,9 @@
     app.settingsLoading.style.display = 'block';
     app.settingsError.style.display = 'none';
     app.settingsContent.style.display = 'none';
+    if (app.settingsSaveError) app.settingsSaveError.style.display = 'none';
+    if (app.settingsSaveSuccess) app.settingsSaveSuccess.style.display = 'none';
+    if (app.settingsRestartNotice) app.settingsRestartNotice.style.display = 'none';
     
     try {
       const res = await apiCall('GET', '/ui/api/settings');
@@ -900,34 +1013,42 @@
     const configPath = document.getElementById('settings-config-path');
     const configStatus = document.getElementById('settings-config-status');
     configPath.textContent = data.configFile.path || '(없음)';
-    configStatus.innerHTML = data.configFile.readOnly 
-      ? '<span class="status-badge status-inactive">읽기 전용</span>'
-      : '<span class="status-badge status-active">쓰기 가능</span>';
-    
-    // Server settings
+    if (!data.configFile.path) {
+      configStatus.innerHTML = '<span class="status-badge status-inactive">구성 파일 없음</span>';
+    } else if (data.configFile.readOnly) {
+      configStatus.innerHTML = '<span class="status-badge status-inactive">읽기 전용</span>';
+    } else {
+      configStatus.innerHTML = '<span class="status-badge status-active">쓰기 가능</span>';
+    }
+
+    // Server settings (read-only fields)
     setText('settings-server-listen', data.server.listen);
-    setText('settings-server-public-endpoint', data.server.publicEndpoint || '(미설정)');
     setText('settings-server-enable-ui', data.server.enableUI ? '예' : '아니오');
     setText('settings-server-trust-proxy', data.server.trustProxyHeaders ? '예' : '아니오');
-    
-    // S3 settings
+
+    // Server editable fields
+    setInputValue('settings-server-public-endpoint', data.server.publicEndpoint || '');
+
+    // S3 settings (read-only fields)
     setText('settings-s3-region', data.s3.region);
     setText('settings-s3-virtual-host', data.s3.virtualHostSuffix || '(미설정)');
-    setText('settings-s3-presign-ttl', data.s3.maxPresignTTL);
-    
-    // UI settings
-    setText('settings-ui-session-ttl', data.ui.sessionTTL);
-    setText('settings-ui-idle-ttl', data.ui.sessionIdleTTL);
-    
-    // Logging settings
-    setText('settings-logging-level', data.logging.level);
-    setText('settings-logging-access', data.logging.accessLog ? '예' : '아니오');
-    
-    // GC settings
+
+    // S3 editable fields
+    setInputValue('settings-s3-presign-ttl', data.s3.maxPresignTTL || '');
+
+    // UI editable fields
+    setInputValue('settings-ui-session-ttl', data.ui.sessionTTL || '');
+    setInputValue('settings-ui-idle-ttl', data.ui.sessionIdleTTL || '');
+
+    // Logging editable fields
+    setSelectValue('settings-logging-level', data.logging.level || 'info');
+    setCheckboxValue('settings-logging-access', data.logging.accessLog);
+
+    // GC settings (read-only)
     setText('settings-gc-orphan-interval', data.gc.orphanScanInterval);
     setText('settings-gc-orphan-grace', data.gc.orphanGracePeriod);
     setText('settings-gc-multipart-expiry', data.gc.multipartExpiry);
-    
+
     // Set env-lock badges
     setEnvLock('settings-lock-server-listen', data.envLocked.serverListen);
     setEnvLock('settings-lock-server-public-endpoint', data.envLocked.serverPublicEndpoint);
@@ -943,7 +1064,44 @@
     setEnvLock('settings-lock-gc-orphan-interval', data.envLocked.gcOrphanScanInterval);
     setEnvLock('settings-lock-gc-orphan-grace', data.envLocked.gcOrphanGracePeriod);
     setEnvLock('settings-lock-gc-multipart-expiry', data.envLocked.gcMultipartExpiry);
-    
+
+    // Disable env-locked editable inputs
+    setInputDisabled('settings-server-public-endpoint', data.envLocked.serverPublicEndpoint);
+    setInputDisabled('settings-s3-presign-ttl', data.envLocked.s3MaxPresignTTL);
+    setInputDisabled('settings-ui-session-ttl', data.envLocked.uiSessionTTL);
+    setInputDisabled('settings-ui-idle-ttl', data.envLocked.uiSessionIdleTTL);
+    setInputDisabled('settings-logging-level', data.envLocked.loggingLevel);
+    setInputDisabled('settings-logging-access', data.envLocked.loggingAccessLog);
+
+    // Handle save button state based on config file writability and envLocked fields
+    const allEditableEnvLocked = !!(
+      data.envLocked.serverPublicEndpoint &&
+      data.envLocked.s3MaxPresignTTL &&
+      data.envLocked.uiSessionTTL &&
+      data.envLocked.uiSessionIdleTTL &&
+      data.envLocked.loggingLevel &&
+      data.envLocked.loggingAccessLog);
+    settingsCanSave = !!(data.configFile.path && !data.configFile.readOnly && !allEditableEnvLocked);
+    captureSettingsBaseline(data);
+    attachSettingsChangeListeners();
+    if (app.settingsSaveBtn) {
+      updateSettingsSaveButtonState();
+    }
+    if (app.settingsReadonlyNotice) {
+      if (!data.configFile.path) {
+        app.settingsReadonlyNotice.textContent = '구성 파일이 없어 저장할 수 없습니다';
+        app.settingsReadonlyNotice.style.display = 'block';
+      } else if (data.configFile.readOnly) {
+        app.settingsReadonlyNotice.textContent = '구성 파일이 읽기 전용이라 저장할 수 없습니다';
+        app.settingsReadonlyNotice.style.display = 'block';
+      } else if (allEditableEnvLocked) {
+        app.settingsReadonlyNotice.textContent = '환경변수로 잠겨 있어 편집 가능한 설정이 없습니다';
+        app.settingsReadonlyNotice.style.display = 'block';
+      } else {
+        app.settingsReadonlyNotice.style.display = 'none';
+      }
+    }
+
     // Path status table
     renderPathStatus(data.pathStatus);
   }
@@ -951,6 +1109,26 @@
   function setText(id, value) {
     const el = document.getElementById(id);
     if (el) el.textContent = value || '-';
+  }
+
+  function setInputValue(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.value = value;
+  }
+
+  function setSelectValue(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.value = value;
+  }
+
+  function setCheckboxValue(id, checked) {
+    const el = document.getElementById(id);
+    if (el) el.checked = !!checked;
+  }
+
+  function setInputDisabled(id, disabled) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !!disabled;
   }
 
   function setEnvLock(id, locked) {
@@ -1000,6 +1178,154 @@
     const free = formatBytes(diskStats.freeBytes);
     const usedPercent = Math.round((diskStats.usedBytes / diskStats.totalBytes) * 100);
     return `${used} / ${total} (${usedPercent}% 사용, ${free} 여유)`;
+  }
+
+  // ========== Settings Dirty-State Tracking ==========
+
+  function captureSettingsBaseline(data) {
+    settingsBaseline = {
+      serverPublicEndpoint: data.server.publicEndpoint || '',
+      s3MaxPresignTTL: data.s3.maxPresignTTL || '',
+      loggingLevel: data.logging.level || 'info',
+      loggingAccessLog: !!data.logging.accessLog,
+      uiSessionTTL: data.ui.sessionTTL || '',
+      uiSessionIdleTTL: data.ui.sessionIdleTTL || ''
+    };
+  }
+
+  function computeSettingsDiff() {
+    if (!settingsBaseline) return {};
+    const diff = {};
+
+    const publicEndpoint = document.getElementById('settings-server-public-endpoint');
+    if (publicEndpoint && !publicEndpoint.disabled &&
+        publicEndpoint.value !== settingsBaseline.serverPublicEndpoint) {
+      diff.server = { publicEndpoint: publicEndpoint.value };
+    }
+
+    const maxPresignTTL = document.getElementById('settings-s3-presign-ttl');
+    if (maxPresignTTL && !maxPresignTTL.disabled &&
+        maxPresignTTL.value !== settingsBaseline.s3MaxPresignTTL) {
+      diff.s3 = { maxPresignTTL: maxPresignTTL.value };
+    }
+
+    const loggingLevel = document.getElementById('settings-logging-level');
+    const loggingAccess = document.getElementById('settings-logging-access');
+    const loggingLevelChanged = !!(loggingLevel && !loggingLevel.disabled &&
+        loggingLevel.value !== settingsBaseline.loggingLevel);
+    const loggingAccessChanged = !!(loggingAccess && !loggingAccess.disabled &&
+        loggingAccess.checked !== settingsBaseline.loggingAccessLog);
+    if (loggingLevelChanged || loggingAccessChanged) {
+      diff.logging = {};
+      if (loggingLevelChanged) diff.logging.level = loggingLevel.value;
+      if (loggingAccessChanged) diff.logging.accessLog = loggingAccess.checked;
+    }
+
+    const sessionTTL = document.getElementById('settings-ui-session-ttl');
+    const idleTTL = document.getElementById('settings-ui-idle-ttl');
+    const sessionTTLChanged = !!(sessionTTL && !sessionTTL.disabled &&
+        sessionTTL.value !== settingsBaseline.uiSessionTTL);
+    const idleTTLChanged = !!(idleTTL && !idleTTL.disabled &&
+        idleTTL.value !== settingsBaseline.uiSessionIdleTTL);
+    if (sessionTTLChanged || idleTTLChanged) {
+      diff.ui = {};
+      if (sessionTTLChanged) diff.ui.sessionTTL = sessionTTL.value;
+      if (idleTTLChanged) diff.ui.sessionIdleTTL = idleTTL.value;
+    }
+
+    return diff;
+  }
+
+  function isSettingsDirty() {
+    return Object.keys(computeSettingsDiff()).length > 0;
+  }
+
+  function updateSettingsSaveButtonState() {
+    if (!app.settingsSaveBtn) return;
+    app.settingsSaveBtn.disabled = !(settingsCanSave && isSettingsDirty());
+  }
+
+  function attachSettingsChangeListeners() {
+    if (settingsListenersAttached) return;
+    settingsListenersAttached = true;
+    ['settings-server-public-endpoint', 'settings-s3-presign-ttl',
+      'settings-ui-session-ttl', 'settings-ui-idle-ttl'].forEach(function(id) {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('input', updateSettingsSaveButtonState);
+    });
+    const levelEl = document.getElementById('settings-logging-level');
+    if (levelEl) levelEl.addEventListener('change', updateSettingsSaveButtonState);
+    const accessEl = document.getElementById('settings-logging-access');
+    if (accessEl) accessEl.addEventListener('change', updateSettingsSaveButtonState);
+  }
+
+  function resetBaselineFromDOM() {
+    if (!settingsBaseline) return;
+    const publicEndpoint = document.getElementById('settings-server-public-endpoint');
+    const maxPresignTTL = document.getElementById('settings-s3-presign-ttl');
+    const loggingLevel = document.getElementById('settings-logging-level');
+    const loggingAccess = document.getElementById('settings-logging-access');
+    const sessionTTL = document.getElementById('settings-ui-session-ttl');
+    const idleTTL = document.getElementById('settings-ui-idle-ttl');
+    if (publicEndpoint) settingsBaseline.serverPublicEndpoint = publicEndpoint.value;
+    if (maxPresignTTL) settingsBaseline.s3MaxPresignTTL = maxPresignTTL.value;
+    if (loggingLevel) settingsBaseline.loggingLevel = loggingLevel.value;
+    if (loggingAccess) settingsBaseline.loggingAccessLog = loggingAccess.checked;
+    if (sessionTTL) settingsBaseline.uiSessionTTL = sessionTTL.value;
+    if (idleTTL) settingsBaseline.uiSessionIdleTTL = idleTTL.value;
+  }
+
+  // ========== Settings Save ==========
+
+  async function saveSettings() {
+    // Reset messages
+    app.settingsSaveError.style.display = 'none';
+    app.settingsSaveSuccess.style.display = 'none';
+    app.settingsRestartNotice.style.display = 'none';
+
+    if (!settingsCanSave) return;
+
+    // Disable button during save
+    app.settingsSaveBtn.disabled = true;
+    app.settingsSaveBtn.textContent = '저장 중...';
+
+    // Build payload from baseline diff (only changed fields)
+    const payload = computeSettingsDiff();
+
+    // Guard: block empty payload / no-op save independent of settingsCanSave
+    if (Object.keys(payload).length === 0) {
+      app.settingsSaveError.textContent = '변경된 설정이 없습니다.';
+      app.settingsSaveError.style.display = 'block';
+      app.settingsSaveBtn.textContent = '설정 저장';
+      updateSettingsSaveButtonState();
+      return;
+    }
+
+    try {
+      const res = await apiCall('POST', '/ui/api/settings', payload);
+      if (res.ok) {
+        const data = await res.json();
+        app.settingsSaveSuccess.textContent = '설정이 성공적으로 저장되었습니다.';
+        app.settingsSaveSuccess.style.display = 'block';
+        if (data.requiresRestart) {
+          app.settingsRestartNotice.style.display = 'block';
+        }
+        resetBaselineFromDOM();
+      } else if (res.status === 401) {
+        showScreen('login');
+      } else {
+        const errData = await res.json();
+        app.settingsSaveError.textContent = errData.error || '설정 저장에 실패했습니다.';
+        app.settingsSaveError.style.display = 'block';
+      }
+    } catch (e) {
+      console.error('Failed to save settings:', e);
+      app.settingsSaveError.textContent = '서버 연결 오류가 발생했습니다.';
+      app.settingsSaveError.style.display = 'block';
+    } finally {
+      app.settingsSaveBtn.textContent = '설정 저장';
+      updateSettingsSaveButtonState();
+    }
   }
 
   // ========== Password Change ==========
@@ -1376,6 +1702,27 @@
 
   app.objectMetaClose.addEventListener('click', closeObjectMeta);
   
+  // Presigned URL generation button
+  const presignGenerateBtn = document.getElementById('presign-generate-btn');
+  if (presignGenerateBtn) {
+    presignGenerateBtn.addEventListener('click', () => {
+      const bucket = document.getElementById('meta-bucket')?.textContent;
+      const key = document.getElementById('meta-key')?.textContent;
+      const method = document.getElementById('presign-method')?.value || 'GET';
+      const expires = document.getElementById('presign-expires')?.value || '3600';
+      
+      if (bucket && key) {
+        generatePresignedURL(bucket, key, method, expires);
+      }
+    });
+  }
+  
+  // Presigned URL copy button
+  const presignCopyBtn = document.getElementById('presign-copy-btn');
+  if (presignCopyBtn) {
+    presignCopyBtn.addEventListener('click', copyPresignedURL);
+  }
+  
   // Event delegation for bucket table actions
   app.bucketsTbody.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-action="delete-bucket"]');
@@ -1540,6 +1887,11 @@
     
     changePassword(currentPassword, newPassword);
   });
+
+  // Settings save button
+  if (app.settingsSaveBtn) {
+    app.settingsSaveBtn.addEventListener('click', saveSettings);
+  }
 
   // ========== Initialize ==========
 

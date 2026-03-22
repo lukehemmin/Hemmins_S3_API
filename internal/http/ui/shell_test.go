@@ -1488,3 +1488,696 @@ func TestUIShell_PasswordChangeCardInSettingsSection(t *testing.T) {
 		t.Error("expected password-change-card to have settings-card class")
 	}
 }
+
+// Test 72: Presigned URL section exists in meta panel.
+func TestUIShell_PresignSectionExists(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	// Presign section
+	if !strings.Contains(body, "presign-section") {
+		t.Error("expected presign-section class in HTML")
+	}
+	// Presign method select
+	if !strings.Contains(body, "presign-method") {
+		t.Error("expected presign-method select in HTML")
+	}
+	// Presign expires input
+	if !strings.Contains(body, "presign-expires") {
+		t.Error("expected presign-expires input in HTML")
+	}
+	// Presign generate button
+	if !strings.Contains(body, "presign-generate-btn") {
+		t.Error("expected presign-generate-btn in HTML")
+	}
+	// Presign URL display
+	if !strings.Contains(body, "presign-url") {
+		t.Error("expected presign-url element in HTML")
+	}
+	// Presign copy button
+	if !strings.Contains(body, "presign-copy-btn") {
+		t.Error("expected presign-copy-btn in HTML")
+	}
+}
+
+// Test 73: JavaScript contains presigned URL functions.
+func TestUIShell_JSContainsPresignFunctions(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/static/app.js", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	// Generate presigned URL function
+	if !strings.Contains(body, "generatePresignedURL") {
+		t.Error("expected generatePresignedURL function in app.js")
+	}
+	// Copy presigned URL function
+	if !strings.Contains(body, "copyPresignedURL") {
+		t.Error("expected copyPresignedURL function in app.js")
+	}
+	// Show presign result function
+	if !strings.Contains(body, "showPresignResult") {
+		t.Error("expected showPresignResult function in app.js")
+	}
+	// Hide presign error function
+	if !strings.Contains(body, "hidePresignError") {
+		t.Error("expected hidePresignError function in app.js")
+	}
+}
+
+// Test 74: JavaScript uses correct presign API endpoint.
+func TestUIShell_JSUsesPresignAPIEndpoint(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/static/app.js", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	// Check that the JS uses the presign API endpoint
+	if !strings.Contains(body, "/objects/presign") {
+		t.Error("expected /objects/presign endpoint usage in app.js")
+	}
+}
+
+// Test 75: CSS contains presigned URL styles.
+func TestUIShell_CSSContainsPresignStyles(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/static/style.css", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	// Presign section styles
+	if !strings.Contains(body, ".presign-section") {
+		t.Error("expected .presign-section class in CSS")
+	}
+	if !strings.Contains(body, ".presign-form") {
+		t.Error("expected .presign-form class in CSS")
+	}
+	if !strings.Contains(body, ".presign-result") {
+		t.Error("expected .presign-result class in CSS")
+	}
+	if !strings.Contains(body, ".presign-url") {
+		t.Error("expected .presign-url class in CSS")
+	}
+}
+
+// ========== Settings Write Shell Tests ==========
+
+// Test 76: Settings save section exists in HTML shell.
+func TestUIShell_SettingsSaveSectionExists(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	// Save section container
+	if !strings.Contains(body, "settings-save-section") {
+		t.Error("expected settings-save-section ID in HTML")
+	}
+	// Save button
+	if !strings.Contains(body, "settings-save-btn") {
+		t.Error("expected settings-save-btn ID in HTML")
+	}
+	// Save error/success message areas
+	if !strings.Contains(body, "settings-save-error") {
+		t.Error("expected settings-save-error ID in HTML")
+	}
+	if !strings.Contains(body, "settings-save-success") {
+		t.Error("expected settings-save-success ID in HTML")
+	}
+	// Restart notice
+	if !strings.Contains(body, "settings-restart-notice") {
+		t.Error("expected settings-restart-notice ID in HTML")
+	}
+	// Readonly notice
+	if !strings.Contains(body, "settings-readonly-notice") {
+		t.Error("expected settings-readonly-notice ID in HTML")
+	}
+}
+
+// Test 77: Settings editable input fields exist in HTML shell.
+func TestUIShell_SettingsEditableInputsExist(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	// Editable text inputs for safe subset fields
+	editableInputs := []string{
+		"settings-server-public-endpoint",
+		"settings-s3-presign-ttl",
+		"settings-ui-session-ttl",
+		"settings-ui-idle-ttl",
+	}
+	for _, id := range editableInputs {
+		if !strings.Contains(body, id) {
+			t.Errorf("expected %s ID in HTML", id)
+		}
+	}
+
+	// Logging level select
+	if !strings.Contains(body, "settings-logging-level") {
+		t.Error("expected settings-logging-level ID in HTML")
+	}
+	// Logging access checkbox
+	if !strings.Contains(body, "settings-logging-access") {
+		t.Error("expected settings-logging-access ID in HTML")
+	}
+
+	// Verify editable fields are inputs/selects (not spans)
+	if !strings.Contains(body, `<input type="text" id="settings-server-public-endpoint"`) {
+		t.Error("expected settings-server-public-endpoint to be an input element")
+	}
+	if !strings.Contains(body, `<select id="settings-logging-level"`) {
+		t.Error("expected settings-logging-level to be a select element")
+	}
+	if !strings.Contains(body, `<input type="checkbox" id="settings-logging-access"`) {
+		t.Error("expected settings-logging-access to be a checkbox input")
+	}
+}
+
+// Test 78: JavaScript contains saveSettings function.
+func TestUIShell_JSContainsSaveSettingsFunction(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/static/app.js", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	// saveSettings function
+	if !strings.Contains(body, "saveSettings") {
+		t.Error("expected saveSettings function in app.js")
+	}
+	// Helper functions for input handling
+	if !strings.Contains(body, "setInputValue") {
+		t.Error("expected setInputValue helper function in app.js")
+	}
+	if !strings.Contains(body, "setInputDisabled") {
+		t.Error("expected setInputDisabled helper function in app.js")
+	}
+	// settingsCanSave state variable
+	if !strings.Contains(body, "settingsCanSave") {
+		t.Error("expected settingsCanSave state variable in app.js")
+	}
+}
+
+// Test 79: JavaScript uses POST /ui/api/settings for save.
+func TestUIShell_JSUsesSettingsSaveEndpoint(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/static/app.js", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	// Uses POST method to save settings
+	if !strings.Contains(body, "'POST', '/ui/api/settings'") {
+		t.Error("expected POST /ui/api/settings call in app.js")
+	}
+	// Handles requiresRestart response
+	if !strings.Contains(body, "requiresRestart") {
+		t.Error("expected requiresRestart handling in app.js")
+	}
+}
+
+// Test 80: CSS contains settings save styles.
+func TestUIShell_CSSContainsSettingsSaveStyles(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/static/style.css", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	// Settings input styles
+	if !strings.Contains(body, ".settings-input") {
+		t.Error("expected .settings-input class in CSS")
+	}
+	// Settings save card
+	if !strings.Contains(body, ".settings-save-card") {
+		t.Error("expected .settings-save-card class in CSS")
+	}
+	// Restart notice styling
+	if !strings.Contains(body, ".settings-restart-notice") {
+		t.Error("expected .settings-restart-notice class in CSS")
+	}
+	// Readonly info styling
+	if !strings.Contains(body, ".settings-readonly-info") {
+		t.Error("expected .settings-readonly-info class in CSS")
+	}
+	// Disabled input styling
+	if !strings.Contains(body, ".settings-input:disabled") {
+		t.Error("expected .settings-input:disabled style in CSS")
+	}
+	// Checkbox styles
+	if !strings.Contains(body, ".settings-checkbox") {
+		t.Error("expected .settings-checkbox class in CSS")
+	}
+}
+
+// Test 81: Logging level select has correct options.
+func TestUIShell_LoggingLevelSelectOptions(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	levels := []string{
+		`value="debug"`,
+		`value="info"`,
+		`value="warn"`,
+		`value="error"`,
+	}
+	for _, level := range levels {
+		if !strings.Contains(body, level) {
+			t.Errorf("expected logging level option %s in HTML", level)
+		}
+	}
+}
+
+// Test 82: Settings restart notice text is present.
+func TestUIShell_SettingsRestartNoticeText(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	// Restart notice text
+	if !strings.Contains(body, "재시작") {
+		t.Error("expected '재시작' text in settings restart notice")
+	}
+}
+
+// Test 84: JavaScript renders 3-state config file status badge (no file / read-only / writable).
+func TestUIShell_JSRendersThreeStateConfigStatusBadge(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/static/app.js", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	// No config file branch must be present
+	if !strings.Contains(body, "구성 파일 없음") {
+		t.Error("expected '구성 파일 없음' badge text in app.js for no config file state")
+	}
+	// Read-only branch must be present
+	if !strings.Contains(body, "읽기 전용") {
+		t.Error("expected '읽기 전용' badge text in app.js for read-only state")
+	}
+	// Writable branch must be present
+	if !strings.Contains(body, "쓰기 가능") {
+		t.Error("expected '쓰기 가능' badge text in app.js for writable state")
+	}
+	// Guard must check data.configFile.path before readOnly
+	if !strings.Contains(body, "!data.configFile.path") {
+		t.Error("expected !data.configFile.path guard in app.js for no-file branch")
+	}
+}
+
+// Test 85: JavaScript settingsCanSave guards against all editable fields being env-locked.
+func TestUIShell_JSSettingsCanSaveGuardsAllEnvLocked(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/static/app.js", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	// allEditableEnvLocked variable must be present
+	if !strings.Contains(body, "allEditableEnvLocked") {
+		t.Error("expected allEditableEnvLocked variable in app.js")
+	}
+	// settingsCanSave must incorporate the allEditableEnvLocked guard
+	if !strings.Contains(body, "!allEditableEnvLocked") {
+		t.Error("expected !allEditableEnvLocked guard in settingsCanSave calculation in app.js")
+	}
+	// All six editable safe-subset fields must be included in the check
+	safeSubsetKeys := []string{
+		"data.envLocked.serverPublicEndpoint",
+		"data.envLocked.s3MaxPresignTTL",
+		"data.envLocked.uiSessionTTL",
+		"data.envLocked.uiSessionIdleTTL",
+		"data.envLocked.loggingLevel",
+		"data.envLocked.loggingAccessLog",
+	}
+	for _, key := range safeSubsetKeys {
+		if !strings.Contains(body, key) {
+			t.Errorf("expected %s in allEditableEnvLocked check in app.js", key)
+		}
+	}
+}
+
+// Test 86: JavaScript loadSettings resets stale save messages on re-entry.
+func TestUIShell_JSLoadSettingsResetsStaleSaveMessages(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/static/app.js", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	// loadSettings must reset save error, success, and restart notice messages
+	if !strings.Contains(body, "app.settingsSaveError") {
+		t.Error("expected app.settingsSaveError reference inside loadSettings in app.js")
+	}
+	if !strings.Contains(body, "app.settingsSaveSuccess") {
+		t.Error("expected app.settingsSaveSuccess reference inside loadSettings in app.js")
+	}
+	if !strings.Contains(body, "app.settingsRestartNotice") {
+		t.Error("expected app.settingsRestartNotice reference inside loadSettings in app.js")
+	}
+}
+
+// Test 83: JavaScript handles envLocked field disabling.
+func TestUIShell_JSHandlesEnvLockedDisabling(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/static/app.js", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	// Should disable env-locked inputs
+	if !strings.Contains(body, "setInputDisabled('settings-server-public-endpoint'") {
+		t.Error("expected envLocked disabling for server.publicEndpoint in app.js")
+	}
+	if !strings.Contains(body, "setInputDisabled('settings-logging-level'") {
+		t.Error("expected envLocked disabling for logging.level in app.js")
+	}
+	if !strings.Contains(body, "setInputDisabled('settings-logging-access'") {
+		t.Error("expected envLocked disabling for logging.accessLog in app.js")
+	}
+}
+
+// Test 87: JavaScript has three distinct disable reason strings for the save notice.
+func TestUIShell_JSHasThreeDistinctDisableReasonStrings(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/static/app.js", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	// No config file reason
+	if !strings.Contains(body, "구성 파일이 없어 저장할 수 없습니다") {
+		t.Error("expected 'no config file' disable reason string in app.js")
+	}
+	// Read-only config file reason
+	if !strings.Contains(body, "구성 파일이 읽기 전용이라 저장할 수 없습니다") {
+		t.Error("expected 'read-only config file' disable reason string in app.js")
+	}
+	// All editable fields env-locked reason
+	if !strings.Contains(body, "환경변수로 잠겨 있어 편집 가능한 설정이 없습니다") {
+		t.Error("expected 'all editable env-locked' disable reason string in app.js")
+	}
+}
+
+// Test 88: JavaScript has empty payload guard in saveSettings.
+func TestUIShell_JSHasEmptyPayloadGuard(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/static/app.js", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	// Empty payload guard must check keys of payload object
+	if !strings.Contains(body, "Object.keys(payload).length === 0") {
+		t.Error("expected Object.keys(payload).length === 0 guard in app.js saveSettings")
+	}
+	// Guard must show a user-visible message
+	if !strings.Contains(body, "변경된 설정이 없습니다") {
+		t.Error("expected '변경된 설정이 없습니다' message for empty payload guard in app.js")
+	}
+}
+
+// Test 89: JavaScript no-op POST guard is independent of settingsCanSave.
+// The empty-payload guard must exist as a separate check that fires after
+// the payload is built but before apiCall, regardless of settingsCanSave.
+func TestUIShell_JSNoOpGuardIndependentOfSettingsCanSave(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/static/app.js", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	// settingsCanSave gate must be present (first gate)
+	if !strings.Contains(body, "if (!settingsCanSave) return;") {
+		t.Error("expected 'if (!settingsCanSave) return;' gate in app.js saveSettings")
+	}
+	// Empty payload guard must be present (second, independent gate after payload build)
+	if !strings.Contains(body, "Object.keys(payload).length === 0") {
+		t.Error("expected empty payload guard in app.js saveSettings independent of settingsCanSave")
+	}
+	// Empty payload guard must appear after the settingsCanSave gate (layered defence)
+	settingsCanSaveIdx := strings.Index(body, "if (!settingsCanSave) return;")
+	emptyPayloadIdx := strings.Index(body, "Object.keys(payload).length === 0")
+	if settingsCanSaveIdx == -1 || emptyPayloadIdx == -1 {
+		t.Error("both settingsCanSave and empty payload guards must exist in app.js")
+	} else if emptyPayloadIdx <= settingsCanSaveIdx {
+		t.Error("empty payload guard must appear after settingsCanSave guard in app.js")
+	}
+}
+
+// Test 90: JavaScript has baseline tracking infrastructure.
+// settingsBaseline must be declared, captureSettingsBaseline must initialise it,
+// and resetBaselineFromDOM must update it after a successful save.
+func TestUIShell_JSHasBaselineTrackingInfrastructure(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/static/app.js", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	if !strings.Contains(body, "settingsBaseline") {
+		t.Error("expected settingsBaseline variable in app.js")
+	}
+	if !strings.Contains(body, "captureSettingsBaseline") {
+		t.Error("expected captureSettingsBaseline function in app.js")
+	}
+	if !strings.Contains(body, "resetBaselineFromDOM") {
+		t.Error("expected resetBaselineFromDOM function in app.js")
+	}
+}
+
+// Test 91: JavaScript has dirty-state computation functions.
+// computeSettingsDiff, isSettingsDirty, and updateSettingsSaveButtonState
+// must all exist in app.js for the dirty-state fix to work.
+func TestUIShell_JSHasDirtyStateComputationFunctions(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/static/app.js", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	if !strings.Contains(body, "computeSettingsDiff") {
+		t.Error("expected computeSettingsDiff function in app.js")
+	}
+	if !strings.Contains(body, "isSettingsDirty") {
+		t.Error("expected isSettingsDirty function in app.js")
+	}
+	if !strings.Contains(body, "updateSettingsSaveButtonState") {
+		t.Error("expected updateSettingsSaveButtonState function in app.js")
+	}
+}
+
+// Test 92: saveSettings builds payload from computeSettingsDiff (changed fields only).
+// The old "all enabled fields" pattern must be gone; payload must come from the diff.
+func TestUIShell_JSPayloadFromDiffNotAllEnabledFields(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/static/app.js", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	// New pattern: payload comes from the diff function
+	if !strings.Contains(body, "const payload = computeSettingsDiff()") {
+		t.Error("expected 'const payload = computeSettingsDiff()' in app.js saveSettings")
+	}
+	// Old pattern must not exist
+	if strings.Contains(body, "Build payload from non-disabled editable inputs") {
+		t.Error("old 'all enabled fields' payload pattern must not exist in app.js saveSettings")
+	}
+}
+
+// Test 93: resetBaselineFromDOM is called after a successful save.
+// After save success the baseline must be updated so the UI returns to pristine state.
+func TestUIShell_JSResetBaselineOnSaveSuccess(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/static/app.js", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	if !strings.Contains(body, "resetBaselineFromDOM()") {
+		t.Error("expected resetBaselineFromDOM() call in app.js saveSettings success branch")
+	}
+	// Must appear after the res.ok check
+	resOkIdx := strings.Index(body, "if (res.ok)")
+	resetBaselineIdx := strings.Index(body, "resetBaselineFromDOM()")
+	if resOkIdx == -1 || resetBaselineIdx == -1 {
+		t.Error("both res.ok check and resetBaselineFromDOM() must exist in app.js")
+	} else if resetBaselineIdx <= resOkIdx {
+		t.Error("resetBaselineFromDOM() must appear after the res.ok check in app.js")
+	}
+}
+
+// Test 94: attachSettingsChangeListeners exists and wires fields for dirty tracking.
+// Input/change events on the tracked fields must trigger save button state update.
+func TestUIShell_JSAttachSettingsChangeListeners(t *testing.T) {
+	handler, _ := setupTestUIServer(t, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/static/app.js", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	if !strings.Contains(body, "attachSettingsChangeListeners") {
+		t.Error("expected attachSettingsChangeListeners function in app.js")
+	}
+	if !strings.Contains(body, "addEventListener('input', updateSettingsSaveButtonState)") {
+		t.Error("expected input event listener wiring updateSettingsSaveButtonState in app.js")
+	}
+	if !strings.Contains(body, "addEventListener('change', updateSettingsSaveButtonState)") {
+		t.Error("expected change event listener wiring updateSettingsSaveButtonState in app.js")
+	}
+}

@@ -505,7 +505,8 @@ func TestSettings_ContainsGCFields(t *testing.T) {
 	}
 }
 
-// Test 14: POST to /ui/api/settings returns 405 Method Not Allowed.
+// Test 14: DELETE to /ui/api/settings returns 405 Method Not Allowed.
+// POST is now allowed (settings save API), so we test with DELETE instead.
 func TestSettings_MethodNotAllowed(t *testing.T) {
 	cfg := testConfig(t)
 	handler, _ := setupTestUIServerWithConfig(t, cfg)
@@ -514,7 +515,7 @@ func TestSettings_MethodNotAllowed(t *testing.T) {
 		t.Fatalf("login failed: %d", loginRR.Code)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/ui/api/settings", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/ui/api/settings", nil)
 	for _, c := range loginRR.Result().Cookies() {
 		req.AddCookie(c)
 	}

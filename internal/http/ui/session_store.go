@@ -14,12 +14,19 @@ const sessionIDBytes = 32 // 256-bit session ID
 
 // Session represents an authenticated admin UI session.
 // Per security-model.md section 6: absolute and idle expiry are both tracked.
+//
+// TTL and IdleTTL are captured from the SessionStore at session creation time.
+// This ensures that hot-reloading session TTL settings only affects new sessions;
+// existing sessions retain the TTL policy active when they were created.
+// Per configuration-model.md section 8.3: session TTL hot-reload is applied to new sessions only.
 type Session struct {
 	ID         string
 	Username   string
 	Role       string
 	CreatedAt  time.Time
 	LastSeenAt time.Time
+	TTL        time.Duration // absolute TTL captured at session creation time
+	IdleTTL    time.Duration // idle TTL captured at session creation time
 }
 
 // SessionStore is a thread-safe in-memory session store.
@@ -61,15 +68,17 @@ func (s *SessionStore) Create(username, role string) (string, error) {
 	id := base64.URLEncoding.EncodeToString(b)
 
 	now := s.now()
+
+	s.mu.Lock()
 	sess := &Session{
 		ID:         id,
 		Username:   username,
 		Role:       role,
 		CreatedAt:  now,
 		LastSeenAt: now,
+		TTL:        s.ttl,     // capture current store TTL at creation time
+		IdleTTL:    s.idleTTL, // capture current store idle TTL at creation time
 	}
-
-	s.mu.Lock()
 	s.sessions[id] = sess
 	s.mu.Unlock()
 
@@ -91,14 +100,14 @@ func (s *SessionStore) Get(id string) (*Session, bool) {
 		return nil, false
 	}
 
-	// Enforce absolute expiry.
-	if now.Sub(sess.CreatedAt) > s.ttl {
+	// Enforce absolute expiry using this session's own TTL (captured at creation time).
+	if now.Sub(sess.CreatedAt) > sess.TTL {
 		delete(s.sessions, id)
 		return nil, false
 	}
 
-	// Enforce idle expiry.
-	if now.Sub(sess.LastSeenAt) > s.idleTTL {
+	// Enforce idle expiry using this session's own idle TTL (captured at creation time).
+	if now.Sub(sess.LastSeenAt) > sess.IdleTTL {
 		delete(s.sessions, id)
 		return nil, false
 	}
@@ -113,6 +122,24 @@ func (s *SessionStore) Get(id string) (*Session, bool) {
 func (s *SessionStore) Delete(id string) {
 	s.mu.Lock()
 	delete(s.sessions, id)
+	s.mu.Unlock()
+}
+
+// UpdateTTLs updates the absolute and idle TTLs used for newly created sessions.
+// Existing sessions are not affected; they retain the TTL values captured at creation time.
+//
+// Policy rationale (conservative):
+//   - Shorter TTL (security tightening): takes effect for new sessions immediately.
+//     Existing sessions expire at their original deadline — disruptive mid-operation
+//     retroactive shortening is avoided.
+//   - Longer TTL (convenience): applies to new sessions. Existing sessions are unaffected.
+//   - Single-admin use case: retroactive session extension is unnecessary.
+//
+// Per configuration-model.md section 8.3: safe subset hot-reload applies to new sessions only.
+func (s *SessionStore) UpdateTTLs(ttl, idleTTL time.Duration) {
+	s.mu.Lock()
+	s.ttl = ttl
+	s.idleTTL = idleTTL
 	s.mu.Unlock()
 }
 
